@@ -5,6 +5,9 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>NOCustomMaps</AssemblyName>
     <RootNamespace>CustomMaps</RootNamespace>
+    <!-- The DLL's own version, which mod managers (NOMM, via NOMNOM) compare with the release.
+         Keep it equal to Plugin.Version. -->
+    <Version>1.2.1</Version>
     <!-- Where a local build installs itself. Empty or non-existent skips the copy,
          which is what CI does. -->
     <DeployDir Condition="'$(DeployDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Nuclear Option\BepInEx\plugins\NOCustomMaps</DeployDir>

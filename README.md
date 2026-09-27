@@ -8,7 +8,8 @@ multiplayer like the built-in maps.
 
 1. Install BepInEx 5 (x64, 5.4.23 or later) into the game folder and start the game once.
 2. Put `NOCustomMaps.dll` in `BepInEx/plugins/NOCustomMaps/`.
-3. Put your `.nomap` files in `BepInEx/plugins/NOCustomMaps/maps/`.
+3. Put your `.nomap` files in `BepInEx/plugins/NOCustomMaps/maps/`. The plugin creates this folder
+   the first time the game starts with it installed.
 4. Start the game. `BepInEx/LogOutput.log` lists each map it loaded, with the name missions use for it.
 
 ```
@@ -21,7 +22,9 @@ Nuclear Option/
                 └── yourmap.nomap
 ```
 
-Maps are also read from a `CustomMaps` folder in the game's persistent data path.
+Maps are also read from a `CustomMaps` folder in the game's persistent data path, and from
+`BepInEx/plugins/NOCustomMaps/addons/`, where the NOMM mod manager installs maps listed as add-ons of
+this plugin.
 
 ## Multiplayer
 

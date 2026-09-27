@@ -26,7 +26,7 @@ namespace CustomMaps
     public sealed class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.javoski.custommaps";
-        public const string Version = "1.2.0";
+        public const string Version = "1.2.1";
 
         internal static Plugin Instance { get; private set; }
         static ManualLogSource _log;
@@ -62,6 +62,8 @@ namespace CustomMaps
                 Disabled = true;
                 return;
             }
+
+            EnsureMapsFolder();
 
             // Opening a bundle only maps its header, so this is milliseconds even for a
             // 300 MB map; the terrain deserializes on a background request while the
@@ -165,6 +167,14 @@ namespace CustomMaps
             {
                 dirs.Add(Path.Combine(pluginDir, "maps"));
                 dirs.Add(Path.Combine(pluginDir, "NOCustomMaps", "maps"));
+
+                // Maps installed by NOMM. It lists a map as an add-on of this plugin and unpacks
+                // each add-on into addons/<its id>/ beside the DLL, with whatever folders its
+                // archive holds; it cannot be told to use maps/. Every folder under addons/ is
+                // therefore searched too. NOMM switches an add-on off by moving its folder out
+                // of addons/, so a map switched off there is no longer found here.
+                AddAddonFolders(dirs, Path.Combine(pluginDir, "addons"));
+                AddAddonFolders(dirs, Path.Combine(pluginDir, "NOCustomMaps", "addons"));
             }
 
             // Application.persistentDataPath is %LOCALAPPDATA%Low\Shockfront\NuclearOption.
@@ -173,6 +183,56 @@ namespace CustomMaps
                 dirs.Add(Path.Combine(persistent, "CustomMaps"));
 
             return dirs;
+        }
+
+        /// <summary>Every folder under <paramref name="addons"/>, at any depth, if it exists. A
+        /// folder that cannot be listed is logged and skipped.</summary>
+        static void AddAddonFolders(List<string> dirs, string addons)
+        {
+            try
+            {
+                if (!Directory.Exists(addons)) return;
+                dirs.AddRange(Directory.GetDirectories(addons, "*", SearchOption.AllDirectories));
+            }
+            catch (Exception e)
+            {
+                LogWarning($"could not list {addons}: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Creates the plugin's <c>maps</c> folder on first start, so a player installing a map
+        /// has an obvious place to put it instead of having to know the folder's name.
+        ///
+        /// Nothing is created when either plugin-relative maps folder already exists. With the
+        /// DLL in its own <c>NOCustomMaps</c> folder, the folder goes next to it; with the DLL
+        /// dropped straight into <c>BepInEx/plugins/</c>, it goes in <c>NOCustomMaps/maps</c>
+        /// under it rather than a bare <c>plugins/maps</c>, since both are searched and the
+        /// named one says whose it is. A failure (a read-only install, say) is only logged:
+        /// the folder is a convenience, and every other search root still works without it.
+        /// </summary>
+        static void EnsureMapsFolder()
+        {
+            try
+            {
+                string pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+                if (string.IsNullOrEmpty(pluginDir)) return;
+
+                string beside = Path.Combine(pluginDir, "maps");
+                string nested = Path.Combine(pluginDir, "NOCustomMaps", "maps");
+                if (Directory.Exists(beside) || Directory.Exists(nested)) return;
+
+                bool ownFolder = string.Equals(Path.GetFileName(pluginDir), "NOCustomMaps",
+                                               StringComparison.OrdinalIgnoreCase);
+                string target = ownFolder ? beside : nested;
+
+                Directory.CreateDirectory(target);
+                LogInfo($"created {target}; put .nomap files there");
+            }
+            catch (Exception e)
+            {
+                LogWarning($"could not create the maps folder: {e.Message}");
+            }
         }
 
         /// <summary>
