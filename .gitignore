@@ -1,0 +1,15 @@
+logs/
+
+# Build output
+bin/
+obj/
+staging/
+dist/
+artifacts/
+graphify-out/
+
+# Reference assemblies collected for the CI image — game binaries, never commit
+ci/*.zip
+
+# Map bundles, if one is dropped here to test. They are built by NOMapForge.
+*.nomap

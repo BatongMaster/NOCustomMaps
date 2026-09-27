@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-and-build:
+    runs-on: gcas-dotnet
+    env:
+      # Overrides the Steam paths in CustomMaps.csproj. Baked into the CI image by
+      # ci/Dockerfile — note this project needs a superset of the assemblies the
+      # NOAutoGCAS image carries, so that image must be rebuilt from this repo's
+      # ci/collect-refs.ps1 output. See docs/ci.md.
+      ManagedDir: /opt/nuclearoption/Managed
+      BepInExDir: /opt/nuclearoption/BepInEx
+      # This repository uses SHA-256 object format. actions/checkout runs
+      # `git init` without --object-format, so without this its fetch asks for a
+      # 64-hex ref the server cannot resolve. See docs/ci.md.
+      GIT_DEFAULT_HASH: sha256
+
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      # Checked before anything is compiled, because a violation produces a wall of
+      # "type not found" errors that point nowhere near the cause.
+      - name: Check Core/ is free of engine and game types
+        run: |
+          # Core/ is linked into the test project with no reference assemblies at all.
+          # A stray `using UnityEngine` there does not fail with something readable —
+          # it fails the whole build with an error that names the wrong file. Say so
+          # plainly instead. The same rule holds for the copy of Core/ in NOMapForge,
+          # which is the writing side of these file formats.
+          if grep -rnE '^[[:space:]]*using[[:space:]]+(UnityEngine|BepInEx|HarmonyLib|NuclearOption|MonoMod|Mirage)' Core/; then
+            echo "::error::Core/ must stay free of Unity, BepInEx, Harmony, Mirage and game types — it is compiled into the test project with no reference assemblies."
+            exit 1
+          fi
+          echo "Core/ is clean."
+
+      - name: Restore
+        run: |
+          dotnet restore tests/CustomMaps.Tests/CustomMaps.Tests.csproj
+          dotnet restore CustomMaps.csproj
+
+      - name: Test
+        run: |
+          dotnet test tests/CustomMaps.Tests/CustomMaps.Tests.csproj \
+            -c Release --no-restore \
+            --logger 'trx;LogFileName=test-results.trx' \
+            --results-directory artifacts/test-results
+
+      # DeployDir is emptied explicitly. The default points at a Windows Steam
+      # install, so the Exists() guard already skips it here — being explicit means a
+      # future change to that guard cannot make CI start writing outside the workspace.
+      - name: Build mod
+        run: dotnet build CustomMaps.csproj -c Release --no-restore -p:DeployDir=
+
+      # The map generator, its hydrology invariants and manifest validation moved to the
+      # NOMapForge repository along with Gen/ and tools/MapGen; they are checked there.
+
+      - name: Upload test results
+        if: always()
+        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: test-results
+          path: artifacts/test-results
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload plugin
+        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: NOCustomMaps.dll
+          path: bin/Release/netstandard2.1/NOCustomMaps.dll
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,143 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>NOCustomMaps</AssemblyName>
+    <RootNamespace>CustomMaps</RootNamespace>
+    <!-- Where a local build installs itself. Empty or non-existent skips the copy,
+         which is what CI does. -->
+    <DeployDir Condition="'$(DeployDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Nuclear Option\BepInEx\plugins\NOCustomMaps</DeployDir>
+    <!-- Local Steam install by default; CI overrides both (see .forgejo/workflows). -->
+    <ManagedDir Condition="'$(ManagedDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Nuclear Option\NuclearOption_Data\Managed</ManagedDir>
+    <BepInExDir Condition="'$(BepInExDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Nuclear Option\BepInEx\core</BepInExDir>
+    <RestoreAdditionalProjectSources>
+      https://api.nuget.org/v3/index.json;
+      https://nuget.bepinex.dev/v3/index.json
+    </RestoreAdditionalProjectSources>
+    <!--
+      Mirage.dll was compiled against System.IO.Compression 4.2.0.0; the
+      netstandard2.1 reference pack carries 4.1.3.0. MSBuild reports the
+      unification as MSB3277 and picks 4.1.3.0. That is correct and harmless — at
+      runtime the plugin loads inside the game's own Mono domain, where the only
+      System.IO.Compression present is the one Mirage already runs against, and
+      nothing here touches compression anyway. Demoted to a message so a genuine
+      reference conflict is not lost in eleven lines of expected noise on every
+      CI run.
+    -->
+    <MSBuildWarningsAsMessages>$(MSBuildWarningsAsMessages);MSB3277</MSBuildWarningsAsMessages>
+  </PropertyGroup>
+
+  <!--
+    tests/ links the pure-logic files directly rather than referencing this assembly,
+    so it needs none of the game DLLs and must not be compiled in here.
+
+    The map generator (Gen/, tools/MapGen) and the Unity authoring project used to live
+    in this tree and were excluded here too. They are now the sibling NOMapForge
+    repository; Core/ is the only source shared with it, as a copy on each side.
+  -->
+  <ItemGroup>
+    <Compile Remove="tests\**" />
+    <None Remove="tests\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BepInEx.AssemblyPublicizer.MSBuild" Version="0.4.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Publicized because the fixup pass reaches three non-public members that have
+      no public equivalent: MapSettings.factionMusic (private, and its element type
+      MapMusic is a private nested class, so it can only be copied wholesale off a
+      shipped map), TerrainHeightMap.terrainMaterials (private), and
+      ClientObjectManager._handlers (internal, read to detect a PrefabHash clash
+      before RegisterSpawnHandler throws).
+    -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(ManagedDir)\Assembly-CSharp.dll</HintPath>
+      <Publicize>true</Publicize>
+    </Reference>
+    <Reference Include="Assembly-CSharp-firstpass">
+      <HintPath>$(ManagedDir)\Assembly-CSharp-firstpass.dll</HintPath>
+      <Publicize>true</Publicize>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(ManagedDir)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(ManagedDir)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- AssetBundle. Not referenced by any other mod in this collection. -->
+    <Reference Include="UnityEngine.AssetBundleModule">
+      <HintPath>$(ManagedDir)\UnityEngine.AssetBundleModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- MeshCollider, PhysicMaterial — the terrain classification fixup. -->
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(ManagedDir)\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.ImageConversionModule">
+      <HintPath>$(ManagedDir)\UnityEngine.ImageConversionModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- The mission-editor map buttons: Image, Button, Outline, TextMeshProUGUI. -->
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(ManagedDir)\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(ManagedDir)\UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(ManagedDir)\Unity.TextMeshPro.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- MapLoader.Load and MapSettingsManager.EnableMap return UniTask<T>. Needed
+         to name those signatures in a HarmonyPatch attribute. -->
+    <Reference Include="UniTask">
+      <HintPath>$(ManagedDir)\UniTask.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- NetworkIdentity, ClientObjectManager, ServerObjectManager. -->
+    <Reference Include="Mirage">
+      <HintPath>$(ManagedDir)\Mirage.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BepInEx">
+      <HintPath>$(BepInExDir)\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(BepInExDir)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!--
+    Installs the built plugin straight into the game.
+
+    The other mods in this collection deliberately have no deploy step, because the
+    game holds the DLL open and a failed copy in the middle of a build is confusing.
+    That is handled here rather than avoided: the copy is skipped when the target
+    folder does not exist (CI, or a machine without the game), and a lock is reported
+    as a warning naming the cause rather than failing the build. The DLL that just
+    compiled is still in bin/ either way.
+
+    Override with -p:DeployDir=... , or -p:DeployDir= to switch it off.
+  -->
+  <Target Name="DeployToGame" AfterTargets="Build"
+          Condition="'$(DeployDir)' != '' And Exists('$(DeployDir)')">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(DeployDir)"
+          ContinueOnError="WarnAndContinue" />
+    <Message Importance="high" Text="Deployed $(TargetFileName) -> $(DeployDir)"
+             Condition="'$(MSBuildLastTaskResult)' == 'true'" />
+    <Warning Text="Could not copy $(TargetFileName) to $(DeployDir) — the game is probably running and holding it open."
+             Condition="'$(MSBuildLastTaskResult)' != 'true'" />
+  </Target>
+
+</Project>

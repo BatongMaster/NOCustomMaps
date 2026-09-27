@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    runs-on: gcas-dotnet
+    env:
+      ManagedDir: /opt/nuclearoption/Managed
+      BepInExDir: /opt/nuclearoption/BepInEx
+      # SHA-256 repository; see the note in ci.yml and docs/ci.md.
+      GIT_DEFAULT_HASH: sha256
+
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      # The BepInPlugin version is a compile-time literal, so a tag that
+      # disagrees with it would ship a mislabelled plugin. Fail early instead.
+      - name: Check plugin version matches tag
+        run: |
+          tag="${{ github.ref_name }}"
+          tag="${tag#v}"
+          declared=$(sed -n 's/.*public const string Version *= *"\([^"]*\)".*/\1/p' Plugin.cs)
+          echo "tag=$tag  Plugin.cs=$declared"
+          if [ -z "$declared" ]; then
+            echo "::error::could not read the plugin Version constant out of Plugin.cs"
+            exit 1
+          fi
+          if [ "$tag" != "$declared" ]; then
+            echo "::error::tag $tag does not match the Version constant $declared in Plugin.cs"
+            exit 1
+          fi
+
+      - name: Restore
+        run: |
+          dotnet restore tests/CustomMaps.Tests/CustomMaps.Tests.csproj
+          dotnet restore CustomMaps.csproj
+
+      - name: Test
+        run: |
+          dotnet test tests/CustomMaps.Tests/CustomMaps.Tests.csproj \
+            -c Release --no-restore
+
+      - name: Build mod
+        run: dotnet build CustomMaps.csproj -c Release --no-restore -p:DeployDir=
+
+      # Laid out so the archive can be extracted straight over the game folder.
+      # maps/ ships empty with a .keep so the drop folder exists after extraction —
+      # bundles are far too large to attach to a plugin release and are distributed
+      # separately.
+      - name: Package
+        run: |
+          version="${{ github.ref_name }}"
+          version="${version#v}"
+          mkdir -p staging/BepInEx/plugins/NOCustomMaps/maps dist/release
+          cp bin/Release/netstandard2.1/NOCustomMaps.dll staging/BepInEx/plugins/NOCustomMaps/
+          cp README.md staging/
+          touch staging/BepInEx/plugins/NOCustomMaps/maps/.keep
+          (cd staging && zip -r "../dist/release/NOCustomMaps-${version}.zip" .)
+          cp bin/Release/netstandard2.1/NOCustomMaps.dll dist/release/
+          ls -l dist/release
+
+      - name: Publish release
+        uses: https://code.forgejo.org/actions/forgejo-release@v2
+        with:
+          direction: upload
+          url: ${{ github.server_url }}
+          repo: ${{ github.repository }}
+          tag: ${{ github.ref_name }}
+          sha: ${{ github.sha }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+          release-dir: dist/release
+          release-notes: |
+            Extract over the Nuclear Option install directory, or drop
+            `NOCustomMaps.dll` into `BepInEx/plugins/NOCustomMaps/` by hand. The game
+            must be closed — it holds the DLL open.
+
+            Map bundles go in `BepInEx/plugins/NOCustomMaps/maps/` as `.nomap`
+            files and are downloaded separately.
+
+            **Multiplayer: the server and every client need the identical `.nomap`
+            file.** A map's registered name embeds a hash of its bundle, so a
+            mismatched build is rejected at join time with a readable message
+            rather than silently disagreeing about where the ground is.
+          verbose: true

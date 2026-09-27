@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <IsPackable>false</IsPackable>
+    <AssemblyName>CustomMaps.Tests</AssemblyName>
+    <RootNamespace>CustomMaps.Tests</RootNamespace>
+    <NoWarn>$(NoWarn);CS0649</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <!--
+    Links the production source directly, with NO reference assemblies: the tests
+    exercise the files that ship, not a copy, and the absence of references is what
+    mechanically enforces that Core/ stays free of Unity and game types.
+
+    Core/ is the pure logic the plugin runs — naming, grid maths, catalogue merge,
+    manifest validation — and the binary formats it reads. The map generator and its
+    tests moved to the sibling NOMapForge repository, which keeps its own copy of Core/
+    as the writing side of the same contract.
+  -->
+  <ItemGroup>
+    <Compile Include="..\..\Core\**\*.cs" LinkBase="Production\Core" />
+  </ItemGroup>
+
+</Project>

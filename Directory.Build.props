@@ -1,0 +1,22 @@
+<Project>
+
+  <PropertyGroup>
+    <!--
+      This repository uses SHA-256 git objects. SourceLink is on by default from
+      .NET 8, and its git reader rejects them:
+
+        error: Error reading git repository information: Unsupported repository
+        extension 'objectformat'. Only noop, preciousObjects, partialclone,
+        worktreeConfig are supported.
+
+      Newer SDKs read them fine, so this only shows up where the SDK is older
+      than the one on the dev machine — the CI image, for instance. Neither the
+      plugin nor the test project needs a source-indexed build, so the queries
+      are simply turned off everywhere.
+    -->
+    <EnableSourceLink>false</EnableSourceLink>
+    <EnableSourceControlManagerQueries>false</EnableSourceControlManagerQueries>
+    <DeterministicSourcePaths>false</DeterministicSourcePaths>
+  </PropertyGroup>
+
+</Project>
