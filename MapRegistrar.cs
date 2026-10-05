@@ -66,15 +66,17 @@ namespace CustomMaps
             Plugin.LogDebug($"MapSettingsManager now holds {merged.Length} map(s)");
         }
 
-        /// <summary>Registers into both catalogues, running prefab fixups in between.
-        /// Order matters: a prefab that fails preparation must never reach
-        /// <c>MapSettingsManager.Maps</c>.</summary>
-        public static void EnsureAll(MapSettingsManager manager)
+        /// <summary>Registers into both catalogues, preparing the prefab of the map being
+        /// enabled, <paramref name="mapName"/>, in between. Order matters: a prefab that fails
+        /// preparation must never reach <c>MapSettingsManager.Maps</c>. The other custom maps
+        /// reach it as each is first enabled; the game looks there in <c>EnableMap</c> alone,
+        /// for the name it was given.</summary>
+        public static void EnsureAll(MapSettingsManager manager, string mapName)
         {
             if (manager == null || Plugin.Disabled) return;
 
             Ensure(manager.MapLoader);
-            MapFixups.PrepareAll(manager);
+            MapFixups.PrepareFor(manager, mapName);
             Ensure(manager);
         }
     }

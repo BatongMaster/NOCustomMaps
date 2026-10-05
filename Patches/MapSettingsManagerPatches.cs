@@ -19,10 +19,14 @@ namespace CustomMaps.Patches
     /// native code body, so a patch there fires for every <c>SceneSingleton&lt;T&gt;</c>
     /// in the game — <c>LevelInfo</c>, <c>TerrainHeightMap</c>, <c>DetailRenderer</c>
     /// and the rest — and has to filter itself out by type check on every one.
+    ///
+    /// Only the map being enabled is prepared (<see cref="MapFixups.PrepareFor"/>): preparing one
+    /// reads its whole prefab.
     /// </summary>
     [HarmonyPatch(typeof(MapSettingsManager), nameof(MapSettingsManager.EnableMap))]
     internal static class EnableMapPatch
     {
-        static void Prefix(MapSettingsManager __instance) => MapRegistrar.EnsureAll(__instance);
+        // __0 is the map's name (EnableMap(string mapName, ...)), by position as elsewhere.
+        static void Prefix(MapSettingsManager __instance, string __0) => MapRegistrar.EnsureAll(__instance, __0);
     }
 }

@@ -43,11 +43,6 @@ namespace CustomMaps
         /// <summary>Name of the child the airbases are parented under.</summary>
         public const string AirbaseRoot = "Airbases";
 
-        /// <summary>Capture radius given to an airfield, as a fraction of the levelled ground
-        /// it stands on. A capture zone should cover the airfield and not the town next to
-        /// it.</summary>
-        const float CaptureFraction = 0.9f;
-
         /// <summary>
         /// Clones the donor airbase once per placement.
         ///
@@ -79,13 +74,19 @@ namespace CustomMaps
             var parent = new GameObject(AirbaseRoot);
             parent.transform.SetParent(root.transform, worldPositionStays: false);
 
+            // The fields' taxi networks, by airbase; none for a bundle built before them, whose airbases
+            // are each given the default network instead (DefaultNetwork).
+            Dictionary<string, TaxiNetworkData> lanes = ReadTaxiways(map);
+
             int built = 0;
             var placed = new System.Text.StringBuilder();
             var points = new List<string>();
+            var taxiing = new List<string>();
 
             foreach (AirbasePlacement placement in placements)
             {
-                Airbase clone = Clone(donor, parent.transform, placement);
+                lanes.TryGetValue(placement.UniqueName ?? "", out TaxiNetworkData fieldLanes);
+                Airbase clone = Clone(donor, parent.transform, placement, fieldLanes, taxiing);
                 if (clone == null) continue;
 
                 // Every identity in the subtree, not just the airbase's own: the donor can
@@ -102,7 +103,7 @@ namespace CustomMaps
                                   $"runway centre ({placement.X,8:N0}, {placement.Z,8:N0}) at {placement.Y,5:N0} m, " +
                                   $"{placement.RunwayLength:N0} x {placement.RunwayWidth:N0} m on {placement.Heading:0}deg, " +
                                   $"levelled {placement.FlatHalfAlong * 2f:N0} x {placement.FlatHalfAcross * 2f:N0} m, " +
-                                  DescribeRunways(clone));
+                                  DescribeRunways(clone) + ", " + DescribeFlag(placement));
             }
 
             Plugin.LogDebug($"{root.name}: {built} airbase(s) built on '{donor.Airbase.name}', " +
@@ -114,8 +115,54 @@ namespace CustomMaps
             foreach (string line in points)
                 Plugin.LogDebug(line);
 
+            foreach (string line in taxiing)
+                Plugin.LogDebug(line);
+
             return registered;
         }
+
+        /// <summary>
+        /// The map's taxi networks, by airbase, from the TextAsset <c>&lt;mapId&gt;_taxiways</c>
+        /// (<see cref="TaxiData"/>). Found by that name, not through the manifest, as the grass mask is:
+        /// a bundle built before taxi networks has none, and that is no fault, so nothing is said about
+        /// it; its airbases get the default network.
+        /// </summary>
+        static Dictionary<string, TaxiNetworkData> ReadTaxiways(LoadedMap map)
+        {
+            var none = new Dictionary<string, TaxiNetworkData>(StringComparer.Ordinal);
+            if (map?.Bundle == null || string.IsNullOrEmpty(map.Manifest?.MapId)) return none;
+
+            TextAsset data;
+            try
+            {
+                data = map.Bundle.LoadAsset<TextAsset>(map.Manifest.MapId + TaxiwaysSuffix);
+            }
+            catch (Exception e)
+            {
+                Plugin.LogWarning($"{map.Name()}: could not load its taxi networks ({e.GetType().Name}: {e.Message}); each " +
+                                  "airbase is given the default one");
+                return none;
+            }
+
+            if (data == null) return none;
+
+            try
+            {
+                var notes = new List<string>();
+                Dictionary<string, TaxiNetworkData> lanes = TaxiPlans.ByAirbase(TaxiData.Read(data.bytes), notes);
+                foreach (string note in notes) Plugin.LogWarning($"{map.Name()}: {note}");
+                return lanes;
+            }
+            catch (Exception e)
+            {
+                Plugin.LogWarning($"{map.Name()}: '{map.Manifest.MapId}{TaxiwaysSuffix}' is not readable taxi networks ({e.Message}); " +
+                                  "each airbase is given the default one");
+                return none;
+            }
+        }
+
+        /// <summary>What the taxi lanes ship as, after the map's id (NOMapForge's <c>MapForge.TaxiwaysSuffix</c>).</summary>
+        public const string TaxiwaysSuffix = "_taxiways";
 
         static List<AirbasePlacement> ReadPlacements(LoadedMap map, string asset)
         {
@@ -201,12 +248,19 @@ namespace CustomMaps
         /// one wanted here, so the whole airfield — runways, taxiways, tower, lights —
         /// turns together and lands on the platform the generator levelled for it.
         /// </summary>
-        static Airbase Clone(Template template, Transform parent, AirbasePlacement placement)
+        /// <param name="lanes">The field's taxi network as the map carries it, or null for one it carries
+        /// none for, which is given the default.</param>
+        /// <param name="log">Gathers a line for each field's network, for after the summary.</param>
+        static Airbase Clone(Template template, Transform parent, AirbasePlacement placement, TaxiNetworkData lanes,
+                             List<string> log)
         {
             Airbase clone = UnityEngine.Object.Instantiate(template.Airbase, parent);
             if (clone == null) return null;
 
             clone.name = placement.UniqueName;
+
+            // What lets a mission move this airbase's flag and set its range, and no other's.
+            clone.gameObject.AddComponent<CustomMapAirbase>();
 
             var rotation = Quaternion.Euler(0f, placement.Heading - DonorHeading(template.Airbase), 0f);
 
@@ -232,12 +286,252 @@ namespace CustomMaps
 
             ForgetRunwayLights(clone);
             LayOutRunway(clone, placement);
-            LayOutExtraRunways(clone, placement);
-            ClearTaxiNetwork(clone);
+            PlaceFlag(clone, placement);
+            int[] runwayOf = LayOutExtraRunways(clone, placement);
+
+            // The field's own taxi network, its AI roads, with every runway's exits rebuilt onto it: the
+            // one the map carries for it (its lanes and taxiways, or Map Forge's default), or for a map
+            // from before taxi networks shipped the default built here, so that no airbase is left
+            // without one. Only when even that cannot be built is the donor's emptied, as it always was.
+            // A network that does not lie on this field's runways was made for where the field was
+            // before: a taxiways.bin left from an earlier export beside airbases.bin from a later one.
+            if (lanes != null && !TaxiPlans.Fits(lanes, placement, out string misfit))
+            {
+                Plugin.LogWarning($"airbase '{placement.UniqueName}': its taxi network in the map does not lie on its runways " +
+                                  $"({misfit}), so it was made for the field before it moved; it gets the default network " +
+                                  "instead. Export the airfields again in Map Forge and rebuild the map");
+                lanes = null;
+            }
+
+            TaxiNetworkData data = lanes ?? DefaultNetwork(clone, placement);
+            TaxiPlan plan = data != null ? TaxiPlans.Plan(data, placement) : null;
+            if (plan != null && plan.HasNetwork && LayOutTaxiNetwork(clone, placement, plan))
+            {
+                int exits = LayOutExits(clone, placement, plan, runwayOf);
+                NetworkSources[clone] = new NetworkSource { Source = data.Source, FromMap = lanes != null };
+                log.Add(DescribeLanes(clone, placement, plan, data.Source, lanes != null, exits));
+            }
+            else ClearTaxiNetwork(clone);
+
+            if (plan != null) PlaceServicePoints(clone, placement, plan);
+
             Rename(clone, placement);
             ForgetDonorTower(clone, placement);
 
             return clone;
+        }
+
+        /// <summary>What an airbase built here was given for a taxi network, and whether the map carried
+        /// it: for the map's check report (<see cref="MapDiagnostics"/>), which reads the prefab's
+        /// airbases right after they are built.</summary>
+        internal struct NetworkSource
+        {
+            public TaxiSource Source;
+            public bool FromMap;
+        }
+
+        internal static readonly Dictionary<Airbase, NetworkSource> NetworkSources = new Dictionary<Airbase, NetworkSource>();
+
+        /// <summary>
+        /// The default taxi network (<see cref="TaxiDefault"/>) for a field the map carries none for,
+        /// which is every field of a bundle built before taxi networks shipped: a lane along the main
+        /// runway on the side of the service point, onto both of its ends and every 700 m or so, the
+        /// same Map Forge now writes for a field drawn with neither lanes nor taxiways. The service point
+        /// is the donor's, where it came to rest on the clone, and stays where it is.
+        ///
+        /// Without it such a field's AI drives every leg in a straight line, through whatever stands in
+        /// the way, and lands its aircraft onto the donor's exits, which on a runway shorter than about
+        /// 1.1 km lie past its ends (<see cref="DescribeDonorPoints"/> logs where they came to rest).
+        /// </summary>
+        static TaxiNetworkData DefaultNetwork(Airbase clone, AirbasePlacement placement)
+        {
+            Transform frame = clone.transform.parent;
+            (float X, float Z) service;
+
+            Transform[] points = typeof(Airbase).GetField(ServicePointsField, BindingFlags.Instance | BindingFlags.NonPublic)
+                                                ?.GetValue(clone) as Transform[];
+            if (points != null && points.Length > 0 && points[0] != null)
+            {
+                Vector3 at = frame != null ? frame.InverseTransformPoint(points[0].position) : points[0].position;
+                service = (at.x, at.z);
+            }
+            else
+            {
+                // Where the donor keeps it: 56 m along and 206 m right of the runway's middle.
+                AirfieldDirection(placement.Heading, out float dx, out float dz);
+                service = (placement.X + dx * 56f + dz * 206f, placement.Z + dz * 56f - dx * 206f);
+            }
+
+            TaxiNetworkData data = TaxiDefault.Build(placement, service);
+            data.ServicePoint = null;
+            return data;
+        }
+
+        /// <summary>
+        /// Gives the clone the field's own taxi network: the game's <c>RoadNetwork</c> of <c>Road</c>s,
+        /// each from one junction to the next, as Map Forge split them (<c>TaxiGraph</c>) or
+        /// <see cref="TaxiDefault"/> laid them, set into the same private field <see cref="ClearTaxiNetwork"/>
+        /// empties.
+        ///
+        /// Set on the prefab, so <c>Instantiate</c> copies it with the airbase as it copied the donor's,
+        /// and <c>Airbase.OnStartServer</c> makes its junctions (<c>RegenerateNetwork</c>, which joins road
+        /// ends within 10 m; the editor keeps every two junctions further apart). The points are map
+        /// coordinates, which is what a <c>GlobalPosition</c> is on a map at the origin, the same frame
+        /// <see cref="RoadNetworkFixup"/> builds the roads in, at the level the platform was cut to and
+        /// the tarmac's 6 cm over it.
+        /// </summary>
+        /// <returns>False when the field could not be set, which leaves the donor's network to be emptied.</returns>
+        static bool LayOutTaxiNetwork(Airbase clone, AirbasePlacement placement, TaxiPlan plan)
+        {
+            FieldInfo field = typeof(Airbase).GetField(TaxiNetworkField, BindingFlags.Instance | BindingFlags.NonPublic);
+            if (field == null)
+            {
+                Plugin.LogWarning($"Airbase has no '{TaxiNetworkField}' field; airbase '{placement.UniqueName}' keeps no taxi " +
+                                  "lanes and its AI taxis straight across the field");
+                return false;
+            }
+
+            var network = new RoadNetwork { AllowMerge = true };
+            float y = placement.Y + TaxiLift;
+
+            foreach ((float X, float Z)[] points in plan.Roads)
+            {
+                var road = new Road();
+                foreach ((float x, float z) in points) road.AddPoint(new GlobalPosition(x, y, z));
+
+                // AddPoint grows the bounding box but leaves the length at 0, and Dijkstra weighs every
+                // road by its length (RoadNetworkFixup.Build says what follows without it).
+                road.CalcLength();
+                network.roads.Add(road);
+            }
+
+            field.SetValue(clone, network);
+            return true;
+        }
+
+        /// <summary>Metres above the platform the taxi network lies: the tarmac's height in the stack
+        /// of surfaces (NOMapForge's <c>AirfieldDrape.TarmacLift</c>).</summary>
+        const float TaxiLift = 0.06f;
+
+        /// <summary>
+        /// Rebuilds every runway's exits from the lanes: one transform for each exit and each way of
+        /// rolling it serves, on the runway's centreline where a lane leaves it, facing the roll, and
+        /// one at each end facing out of the runway, as <see cref="ExtraRunway"/> gives an extra
+        /// runway. They replace the donor's six main-runway exits, which lay where Heartland's
+        /// taxiways leave its strip and, on a runway shorter than about 1.1 km, past this runway's ends.
+        ///
+        /// Exits are what joins a landing to the taxi network. After touchdown the AI takes the nearest
+        /// exit ahead that faces its roll and that it can brake for (<c>Runway.TryGetExitTaxiPoint</c>),
+        /// rolls on unsteered until it is within 20 m of it, and only there looks for a way along the
+        /// lanes to the service point; so an exit has to lie on the centreline, where the roll takes it.
+        /// </summary>
+        /// <param name="runwayOf">The clone's runway for each of the placement's, -1 for one left out.</param>
+        /// <returns>How many exit transforms were made.</returns>
+        static int LayOutExits(Airbase clone, AirbasePlacement placement, TaxiPlan plan, int[] runwayOf)
+        {
+            Transform frame = clone.transform.parent;
+            int made = 0;
+
+            for (int r = 0; r < plan.Exits.Length && r < runwayOf.Length; r++)
+            {
+                int index = runwayOf[r];
+                if (index < 0 || clone.runways == null || index >= clone.runways.Length || plan.Exits[r].Count == 0) continue;
+
+                var exits = new List<Transform>(plan.Exits[r].Count);
+                foreach (PlannedExit exit in plan.Exits[r])
+                {
+                    var point = new GameObject($"Runway {index + 1} exit {exits.Count + 1} " +
+                                               (exit.Forward ? "rolling forward" : "rolling back")).transform;
+                    point.SetParent(clone.transform, worldPositionStays: false);
+                    point.position = Local(frame, new Vector3(exit.X, placement.Y, exit.Z));
+
+                    var facing = new Vector3(exit.FacingX, 0f, exit.FacingZ);
+                    point.rotation = Quaternion.LookRotation(frame != null ? frame.TransformDirection(facing) : facing, Vector3.up);
+                    exits.Add(point);
+                }
+
+                clone.runways[index].exitPoints = exits.ToArray();
+                made += exits.Count;
+            }
+
+            return made;
+        }
+
+        /// <summary>
+        /// Puts the service point and the landing pad where the lanes reach them, when the field says
+        /// where: a field with lanes always does, and a field without may have had them put by hand.
+        /// The donor's sit 56 m along and 206 m right of the runway's middle and 89 m along and 243 m
+        /// right, which a generated layout is paved round and a drawn one may not be. An aircraft that
+        /// has landed taxis to the nearest service point (<c>Airbase.TryGetNearestServicePoint</c>), and
+        /// a vertical-landing one sets down on the pad.
+        ///
+        /// The service point is a transform of the clone's own, set into the private
+        /// <c>servicePoints</c>; the pad is the donor's first <c>VerticalLandingPoint</c>, moved.
+        /// </summary>
+        static void PlaceServicePoints(Airbase clone, AirbasePlacement placement, TaxiPlan plan)
+        {
+            Transform frame = clone.transform.parent;
+
+            if (plan.ServicePoint.HasValue)
+            {
+                FieldInfo field = typeof(Airbase).GetField(ServicePointsField, BindingFlags.Instance | BindingFlags.NonPublic);
+                if (field == null)
+                    Plugin.LogWarning($"Airbase has no '{ServicePointsField}' field; airbase '{placement.UniqueName}' keeps the " +
+                                      "donor's service point");
+                else
+                {
+                    Transform[] donor = field.GetValue(clone) as Transform[];
+                    var point = new GameObject("Service point").transform;
+                    point.SetParent(clone.transform, worldPositionStays: false);
+                    point.position = Local(frame, new Vector3(plan.ServicePoint.Value.X, placement.Y, plan.ServicePoint.Value.Z));
+                    point.rotation = donor != null && donor.Length > 0 && donor[0] != null ? donor[0].rotation : clone.transform.rotation;
+                    field.SetValue(clone, new[] { point });
+                }
+            }
+
+            if (plan.LandingPad.HasValue && clone.verticalLandingPoints != null && clone.verticalLandingPoints.Length > 0 &&
+                clone.verticalLandingPoints[0] != null)
+            {
+                Airbase.VerticalLandingPoint pad = clone.verticalLandingPoints[0];
+                Vector3 at = Local(frame, new Vector3(plan.LandingPad.Value.X, placement.Y, plan.LandingPad.Value.Z));
+
+                // The donor's own pad moves; one that is not the clone's to move gets a transform of its own.
+                if (pad.point != null && pad.point.IsChildOf(clone.transform)) pad.point.position = at;
+                else
+                {
+                    var point = new GameObject("Landing pad").transform;
+                    point.SetParent(clone.transform, worldPositionStays: false);
+                    point.position = at;
+                    pad.point = point;
+                }
+            }
+        }
+
+        /// <summary>One line for a field: what its network was made from, its size, its exits, and each
+        /// runway's numbers as painted beside what the game calls it, which can differ only for a runway
+        /// drawn within a hair of a heading ending in 5.</summary>
+        static string DescribeLanes(Airbase clone, AirbasePlacement placement, TaxiPlan plan, TaxiSource source, bool fromMap,
+                                    int exits)
+        {
+            int points = 0;
+            foreach ((float X, float Z)[] road in plan.Roads) points += road.Length;
+
+            string made = source == TaxiSource.Lanes ? "from its lanes"
+                        : source == TaxiSource.Taxiways ? "from its taxiways"
+                        : fromMap ? "the default" : "the default, built at load (the map carries none, or none for where it is)";
+
+            var called = new List<string>();
+            if (clone.runways != null)
+                foreach (Airbase.Runway runway in clone.runways)
+                {
+                    if (runway?.Start == null || runway.End == null) continue;
+                    string forward = runway.GetName(false), back = runway.GetName(true);
+                    called.Add($"{forward.Replace("Runway ", "")}/{back.Replace("Runway ", "")}");
+                }
+
+            return $"{placement.UniqueName}: taxi network {made}, {plan.Roads.Count} road(s), {points} point(s), {exits} exit(s)" +
+                   (plan.DroppedExits > 0 ? $" ({plan.DroppedExits} on a runway it does not have left out)" : "") +
+                   $"; painted {TaxiPlans.Painted(placement)}, the game calls them {string.Join(", ", called)}";
         }
 
         /// <summary>
@@ -369,9 +663,10 @@ namespace CustomMaps
             }
         }
 
-        /// <summary>The private field <see cref="DescribeDonorPoints"/> reads the service
-        /// points from. Missing, the line says "unreadable" and nothing else changes.</summary>
-        const string ServicePointsField = "servicePoints";
+        /// <summary>The private field <see cref="DescribeDonorPoints"/> reads the service points from,
+        /// and <see cref="PlaceServicePoints"/> sets for a field with lanes; checked at startup.
+        /// Missing, the line says "unreadable" and a field keeps the donor's service point.</summary>
+        public const string ServicePointsField = "servicePoints";
 
         /// <summary>Whether a map position lies inside a drawn outline (even-odd rule; the outline is
         /// in map metres, x east and z north, the same frame the placement is in).</summary>
@@ -423,18 +718,23 @@ namespace CustomMaps
         const string RunwayLightsField = "runwayLights";
 
         /// <summary>
-        /// Takes away the donor's taxi network.
+        /// Takes away the donor's taxi network, for a field that cannot be given its own
+        /// (<see cref="LayOutTaxiNetwork"/>): the game has no field to set, or the runway is too short
+        /// for even the default network.
         ///
         /// It is a private serialised field, so the clone copies it — and its roads are
         /// <c>GlobalPosition</c>s, fixed to where the donor stands on its own map. Measured on
         /// Swiss Alps, every airbase carried Heartland's taxiways 13 to 104 km away, so an
         /// aircraft rolling out after landing pathfound towards another airfield entirely.
         ///
-        /// Emptied rather than rebuilt. <c>AIPilotTaxiState</c> checks <c>taxiNetwork.Exists()</c>
-        /// and, without one, drives straight to the nearest service point after landing and
-        /// straight to the threshold for take-off. The service points are the donor's own
-        /// children, so they moved with the clone and are somewhere on this airfield — where
-        /// exactly is what <see cref="DescribeDonorPoints"/> logs.
+        /// Until 2026-10 every field's was emptied here, and the cost of that is why every field now
+        /// gets a network of its own. <c>AIPilotTaxiState</c> checks <c>taxiNetwork.Exists()</c> and,
+        /// without one, drives straight to the nearest service point after landing and straight to
+        /// the threshold for take-off, through whatever stands in the way. The service points are the
+        /// donor's own children, so they moved with the clone and are somewhere on this airfield —
+        /// where exactly is what <see cref="DescribeDonorPoints"/> logs. Those straight lines cross the
+        /// field's grass, so <see cref="Patches.AirfieldTaxiPatch"/> lets an aircraft taxiing or
+        /// lining up under AI control meet the field's floor as paving.
         /// </summary>
         static void ClearTaxiNetwork(Airbase clone)
         {
@@ -468,8 +768,9 @@ namespace CustomMaps
         /// moved with the clone onto ground this map levelled for a field of its own size, and
         /// nothing draws them. A user driving the roads they had laid across the airfield met
         /// Heartland's aprons as walls they could not see. Everything a wheel should meet here is
-        /// in this map's own bundle: the runway and the painted tarmac, the firm floor over the
-        /// whole field, the road ribbons, and the terrain under all of it.
+        /// in this map's own bundle: the runway and the painted tarmac, the floor over the whole
+        /// field (ground, since <c>MapFixups.GroundAirfieldFloors</c>), the road ribbons, and the
+        /// terrain under all of it.
         ///
         /// Disabled rather than destroyed, so nothing that holds a reference to one of them — the
         /// game's own airbase code, a diagnostic, a later map load — finds a hole where an object
@@ -529,6 +830,90 @@ namespace CustomMaps
         }
 
         /// <summary>
+        /// Stands the airbase's centre, the flag, where the map put it, when the map moved it off the
+        /// middle of the runway, where <see cref="LayOutRunway"/> stood it as it always has. On the
+        /// platform, at the level it was cut to.
+        ///
+        /// The centre is <c>Airbase.center</c>, and moving the transform is all it takes, because
+        /// nothing copies it before the map is instantiated: <c>Airbase.Awake</c> reads it into the
+        /// settings' <c>Center</c>, and everything else asks the transform itself at the time. That
+        /// is the capture zone (<c>Capture.GetInRangeUnits</c> measures from it, and
+        /// <c>Airbase.Update</c> takes the battlefield grid squares round it a second into the
+        /// mission), the map icon (<c>AirbaseMapIcon</c>), the mission editor's flag and radius decal
+        /// (made as its children by <c>MissionEditor.CreateFlagForAirbase</c>, so they come with it),
+        /// where an AI returning to base flies, and the 5 km past which the base lets an aircraft go
+        /// (<c>Airbase.ControlAircraft</c>).
+        ///
+        /// What stays at the runway is everything with a transform of its own: the thresholds, the
+        /// exits, the service points, the landing pads and <c>aircraftSelectionTransform</c>, which
+        /// the spawn menu's camera and the aircraft preview stand on. So anything the donor hung
+        /// under its centre is put back where it was: which of the donor's children are there has
+        /// never been looked at, and none of them is meant to follow the flag. An airbase whose flag
+        /// was not moved is not touched here at all, and is built exactly as before.
+        /// </summary>
+        static void PlaceFlag(Airbase clone, AirbasePlacement placement)
+        {
+            if (!placement.HasFlag || clone.center == null) return;
+
+            // A donor whose centre is the airbase's own transform would carry the whole airfield
+            // off with the flag. None of the shipped ones is built that way; this says so if one is.
+            if (clone.center == clone.transform)
+            {
+                Plugin.LogWarning($"airbase '{placement.UniqueName}': the donor's centre is the airbase itself, so its " +
+                                  "flag stays on the runway centre");
+                return;
+            }
+
+            (float x, float z) = placement.Flag.Value;
+            int kept = MoveCentre(clone, Local(clone.transform.parent, new Vector3(x, placement.Y, z)));
+
+            if (kept > 0)
+                Plugin.LogDebug($"airbase '{placement.UniqueName}': {kept} of the donor's transform(s) under " +
+                                "its centre kept where they were when the flag was moved");
+        }
+
+        /// <summary>
+        /// Moves an airbase's centre, the flag, to a world position, and leaves the donor's
+        /// transforms under it where they were: none of them is meant to follow the flag. The mission
+        /// editor's flag and radius decal, which it hangs under the centre, go with it. Used for the
+        /// map's flag here, on the prefab, and for a mission's in <see cref="MissionAirbases"/>.
+        /// Returns how many of the donor's transforms were kept in place.
+        /// </summary>
+        internal static int MoveCentre(Airbase airbase, Vector3 position)
+        {
+            Transform centre = airbase.center;
+            if (centre == null || centre == airbase.transform) return 0;
+
+            var children = new List<(Transform Child, Vector3 Position, Quaternion Rotation)>();
+            foreach (Transform child in centre)
+            {
+                if (child.GetComponentInChildren<NuclearOption.MissionEditorScripts.AirbaseEditorFlag>(true) != null ||
+                    child.GetComponentInChildren<NuclearOption.MissionEditorScripts.AirbaseEditorRadius>(true) != null)
+                    continue;
+                children.Add((child, child.position, child.rotation));
+            }
+
+            centre.position = position;
+
+            foreach ((Transform child, Vector3 place, Quaternion rotation) in children)
+                child.SetPositionAndRotation(place, rotation);
+
+            return children.Count;
+        }
+
+        /// <summary>The flag and the capture radius for the log: where the flag was put when it was
+        /// moved, and whether the radius is the map's own or the automatic one.</summary>
+        static string DescribeFlag(AirbasePlacement placement)
+        {
+            string flag = placement.HasFlag
+                ? $"flag at ({placement.Flag.Value.X:N0}, {placement.Flag.Value.Z:N0})"
+                : "flag on the runway centre";
+
+            return flag + $", capture radius {placement.CaptureRangeOrDefault:N0} m " +
+                   (placement.HasCaptureRange ? "(the map's own)" : "(automatic)");
+        }
+
+        /// <summary>
         /// Gives the clone this map's other runways, after the main one, and nothing else.
         ///
         /// <c>Airbase.runways</c> is a public serialised array of a <c>[Serializable]</c> class, so
@@ -554,12 +939,18 @@ namespace CustomMaps
         /// strips nobody paved. The donor chosen has one, but the array is rebuilt either way, so
         /// any such runway is dropped rather than kept.
         /// </summary>
-        static void LayOutExtraRunways(Airbase clone, AirbasePlacement placement)
+        /// <returns>For each of the placement's runways, the main one first, its index in the clone's
+        /// array, or -1 for one left out; what the taxi lanes' exits are put on by.</returns>
+        static int[] LayOutExtraRunways(Airbase clone, AirbasePlacement placement)
         {
+            var runwayOf = new int[1 + (placement.HasExtraRunways ? placement.ExtraRunways.Length : 0)];
+            for (int i = 0; i < runwayOf.Length; i++) runwayOf[i] = -1;
+
             Airbase.Runway main = FirstRunway(clone);
-            if (main?.Start == null || main.End == null) return;
+            if (main?.Start == null || main.End == null) return runwayOf;
 
             var runways = new List<Airbase.Runway> { main };
+            runwayOf[0] = 0;
 
             int dropped = (clone.runways?.Length ?? 0) - 1;
             if (dropped > 0)
@@ -585,11 +976,13 @@ namespace CustomMaps
                         continue;
                     }
 
+                    runwayOf[k + 1] = runways.Count;
                     runways.Add(ExtraRunway(clone, frame, main, start, end, extra.Width, runways.Count));
                 }
             }
 
             clone.runways = runways.ToArray();
+            return runwayOf;
         }
 
         /// <summary>
@@ -817,21 +1210,36 @@ namespace CustomMaps
             settings.IsOverride = false;
             settings.Disabled = false;
 
-            // Sized to this airfield rather than inherited from the donor. Airbase.GetRadius
-            // returns CaptureRange, so leaving it at whatever the donor happened to be gave a
-            // small field a capture zone reaching into the next valley, and a large one a
-            // zone that did not cover its own aprons.
+            // The map's own radius, or one sized to this airfield rather than inherited from the
+            // donor. Airbase.GetRadius returns CaptureRange, so leaving it at whatever the donor
+            // happened to be gave a small field a capture zone reaching into the next valley, and
+            // a large one a zone that did not cover its own aprons. It is the map's default: a
+            // mission that sets its own in the editor has that one instead (MissionAirbases).
             settings.Capturable = true;
-            settings.CaptureRange = Mathf.Max(placement.FlatHalfAlong, placement.FlatHalfAcross)
-                                  * CaptureFraction;
+            settings.CaptureRange = placement.CaptureRangeOrDefault;
 
             // Awake fills these from the transforms, but only once the map is instantiated
             // and only if they exist. Writing them here means the settings are already
             // self-consistent for anything that reads them before then — the mission loader
-            // among them.
-            var centre = new GlobalPosition(new Vector3(placement.X, placement.Y, placement.Z));
-            settings.Center = centre;
-            settings.SelectionPosition = centre;
+            // among them. The centre is the flag (PlaceFlag), the map's default a mission can move.
+            // The selection is level with it rather than on the runway: for a built-in airbase the
+            // game never reads it, and a mission's copy of it records what the mission chose
+            // (AirbaseChoice), which a copy of the map's own must read as nothing.
+            (float flagX, float flagZ) = placement.FlagOrCentre;
+            settings.Center = new GlobalPosition(new Vector3(flagX, placement.Y, flagZ));
+            settings.SelectionPosition = settings.Center;
         }
+    }
+
+    /// <summary>
+    /// Marks a drawn airfield's floor, the invisible collider over its whole outline
+    /// (<see cref="MapFixups.IsAirfieldFloor"/>), so <see cref="Patches.AirfieldTaxiPatch"/> can tell one
+    /// by a component, without allocating, instead of reading its parents' names each physics step:
+    /// <c>Object.name</c> makes a new string on every read, and the patch runs for every wheel of every
+    /// AI aircraft taxiing on the grass, fifty times a second. Added on the prefab by
+    /// <c>MapFixups.GroundAirfieldFloors</c>, so every instance has it.
+    /// </summary>
+    internal sealed class AirfieldFloorMark : MonoBehaviour
+    {
     }
 }

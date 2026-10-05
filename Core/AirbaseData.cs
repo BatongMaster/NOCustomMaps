@@ -78,6 +78,68 @@ namespace CustomMaps
         public AirbaseRunway[] ExtraRunways;
 
         public bool HasExtraRunways => ExtraRunways != null && ExtraRunways.Length > 0;
+
+        /// <summary>
+        /// Where the airbase's flag was put by hand, in map metres, or null for the runway centre
+        /// (<see cref="X"/>, <see cref="Z"/>), where every airbase's flag stood before it could be
+        /// moved. It stands on the platform, at <see cref="Y"/>, and so has to be inside the ground
+        /// levelled for the base.
+        ///
+        /// The flag is the game's <c>Airbase.center</c>, the transform the mission editor hangs its
+        /// flag and radius decal on (<c>MissionEditor.CreateFlagForAirbase</c>), and more hangs on it
+        /// than the marker: the capture zone is the circle of <see cref="CaptureRangeOrDefault"/>
+        /// round it (<c>Capture.GetInRangeUnits</c>), the map's airbase icon is drawn on it
+        /// (<c>AirbaseMapIcon</c>), an AI returning to base flies to it, and an aircraft let go by
+        /// the base once it is 5 km away (<c>Airbase.ControlAircraft</c>) is measured from it. The
+        /// runways, the service points and the spawn camera are not: they keep their own transforms.
+        ///
+        /// It is the map's default. A mission can move the flag in the game's mission editor, and
+        /// then the mission's wins (the plugin's <c>MissionAirbases</c>).
+        /// </summary>
+        public (float X, float Z)? Flag;
+
+        public bool HasFlag => Flag.HasValue;
+
+        /// <summary>
+        /// The capture radius round the flag, in metres, or 0 for
+        /// <see cref="AutomaticCaptureRange"/>; otherwise <see cref="AirbaseData.MinCaptureRange"/> to
+        /// <see cref="AirbaseData.MaxCaptureRange"/>, as the game's own slider allows. The game's
+        /// <c>SavedAirbase.CaptureRange</c>. It is the map's default. The game itself lets the map
+        /// win for any airbase built into it (<c>Airbase.LinkSavedAirbase</c> copies the map's
+        /// range over a mission's, and the mission editor greys the slider out); on a custom map
+        /// the plugin turns that round, so a mission that sets its own range in the mission
+        /// editor has it (<c>MissionAirbases</c>).
+        ///
+        /// It is more than the capture zone. The game takes "near the airbase" to mean inside this
+        /// circle round the flag (<c>FactionHQ.AnyNearAirbase</c>): an aircraft its pilot leaves
+        /// standing still there goes back into the inventory rather than being abandoned, a rearming
+        /// aircraft draws nuclear warheads from the base's store only inside it (<c>Rearmer</c>), and
+        /// a taxiing AI finds the base whose taxiways to use by it (<c>AIPilotTaxiState</c>). A
+        /// circle that leaves the aprons out leaves them out of all of that.
+        /// </summary>
+        public float CaptureRange;
+
+        public bool HasCaptureRange => CaptureRange > 0f;
+
+        /// <summary>The share of the levelled ground's larger half-extent the automatic capture
+        /// radius covers: the zone should take in the airfield and not the town next to it.</summary>
+        public const float CaptureFraction = 0.9f;
+
+        /// <summary>
+        /// The capture radius an airbase gets when none was chosen, sized to the ground levelled
+        /// for it rather than inherited from the donor it is cloned from: the donor's own radius gave
+        /// a small field a zone reaching into the next valley and a large one a zone that did not
+        /// cover its aprons. Worked out here, beside the data, so the editor shows exactly the
+        /// radius the plugin will give. It is the radius every airbase had before one could be
+        /// chosen, so a file without one builds exactly the airbases it always did.
+        /// </summary>
+        public float AutomaticCaptureRange => Math.Max(FlatHalfAlong, FlatHalfAcross) * CaptureFraction;
+
+        /// <summary>The capture radius the airbase is given: the one chosen, or the automatic one.</summary>
+        public float CaptureRangeOrDefault => HasCaptureRange ? CaptureRange : AutomaticCaptureRange;
+
+        /// <summary>Where the flag stands on the map: where it was put, or the runway centre.</summary>
+        public (float X, float Z) FlagOrCentre => Flag ?? (X, Z);
     }
 
     /// <summary>
@@ -92,17 +154,21 @@ namespace CustomMaps
     /// game types. That part is borrowed from a shipped map at load and told where its
     /// runway now is.
     ///
-    /// Two versions:
+    /// Five versions:
     ///
     ///   NOAIRB03  count, then per airbase: unique name, display name, faction (strings), x, y, z,
     ///             heading, runway length, runway width, flat half along, flat half across (floats)
     ///   NOAIRB04  the same, then an outline point count (int) and that many x, z pairs (floats)
     ///   NOAIRB05  the same as 4, then an extra runway count (int) and per runway start x, start z,
     ///             end x, end z and width (floats)
+    ///   NOAIRB06  the same as 5, then whether the flag was put by hand (a byte, 0 or 1) and if so
+    ///             its x, z (floats), then the capture range (float, 0 for automatic, otherwise
+    ///             <see cref="AirbaseData.MinCaptureRange"/> to <see cref="AirbaseData.MaxCaptureRange"/>)
     ///
     /// The writer emits the lowest version that holds what it is given: 3 when no airbase has an
-    /// outline, 4 when none has an extra runway. The Swiss Alps file and any plugin that predates
-    /// outlines or extra runways are unaffected until a map uses them.
+    /// outline, 4 when none has an extra runway, 5 when none has a flag put by hand or a capture
+    /// range of its own. The Swiss Alps file and any plugin that predates outlines, extra runways or
+    /// flags are unaffected until a map uses them.
     /// </summary>
     public static class AirbaseData
     {
@@ -117,8 +183,23 @@ namespace CustomMaps
         public static readonly byte[] Magic5 =
             { (byte)'N', (byte)'O', (byte)'A', (byte)'I', (byte)'R', (byte)'B', (byte)'0', (byte)'5' };
 
+        /// <summary>The version 6 magic: a flag put by hand and a capture range of the airbase's own.</summary>
+        public static readonly byte[] Magic6 =
+            { (byte)'N', (byte)'O', (byte)'A', (byte)'I', (byte)'R', (byte)'B', (byte)'0', (byte)'6' };
+
         /// <summary>Sanity bound on a corrupt or hostile file.</summary>
         public const int MaxAirbases = 1024;
+
+        /// <summary>Smallest capture range an airbase may be given, in metres, other than 0 for
+        /// automatic: the bottom of the game's own capture range slider (<c>AirbasePanel</c>). A
+        /// circle of a few metres would do more than stop capture, since the same circle is what
+        /// the game takes to be "at the airbase" (see <see cref="AirbasePlacement.CaptureRange"/>).</summary>
+        public const float MinCaptureRange = 10f;
+
+        /// <summary>Largest capture range an airbase may be given, in metres: the top of the game's
+        /// own capture range slider (<c>AirbasePanel</c>). The base game's airbases run from about
+        /// 750 to 1,560 m.</summary>
+        public const float MaxCaptureRange = 10000f;
 
         /// <summary>Most runways an airbase may have besides its main one. The game keeps a
         /// runway's index in a byte, and no base-game field has more than three.</summary>
@@ -127,8 +208,9 @@ namespace CustomMaps
         /// <summary>Most points an outline may have.</summary>
         public const int MaxOutlinePoints = 512;
 
-        /// <summary>The version a set of airbases is written as: 5 if any has an extra runway,
-        /// otherwise 4 if any has an outline, otherwise 3.</summary>
+        /// <summary>The version a set of airbases is written as: 6 if any has a flag put by hand or
+        /// a capture range of its own, otherwise 5 if any has an extra runway, otherwise 4 if any
+        /// has an outline, otherwise 3.</summary>
         public static int VersionFor(IReadOnlyList<AirbasePlacement> airbases)
         {
             if (airbases == null) return 3;
@@ -136,8 +218,8 @@ namespace CustomMaps
             int version = 3;
             foreach (AirbasePlacement airbase in airbases)
             {
-                if (airbase.HasExtraRunways) return 5;
-                if (airbase.HasOutline) version = 4;
+                if (airbase.HasFlag || airbase.HasCaptureRange) return 6;
+                version = Math.Max(version, airbase.HasExtraRunways ? 5 : airbase.HasOutline ? 4 : 3);
             }
 
             return version;
@@ -156,9 +238,12 @@ namespace CustomMaps
             int version = VersionFor(airbases);
             bool version4 = version >= 4;
 
+            // Checked before a byte is written, so a refused set leaves no half-written file.
+            foreach (AirbasePlacement airbase in airbases) CheckFlag(airbase);
+
             using (var writer = new BinaryWriter(stream, Encoding.UTF8))
             {
-                writer.Write(version == 5 ? Magic5 : version == 4 ? Magic4 : Magic);
+                writer.Write(version == 6 ? Magic6 : version == 5 ? Magic5 : version == 4 ? Magic4 : Magic);
                 writer.Write(airbases.Count);
 
                 foreach (AirbasePlacement airbase in airbases)
@@ -190,7 +275,7 @@ namespace CustomMaps
                         }
                     }
 
-                    if (version == 5)
+                    if (version >= 5)
                     {
                         AirbaseRunway[] runways = airbase.ExtraRunways ?? Array.Empty<AirbaseRunway>();
                         if (runways.Length > MaxExtraRunways)
@@ -207,9 +292,44 @@ namespace CustomMaps
                             writer.Write(runway.Width);
                         }
                     }
+
+                    if (version >= 6)
+                    {
+                        writer.Write((byte)(airbase.HasFlag ? 1 : 0));
+                        if (airbase.HasFlag)
+                        {
+                            writer.Write(airbase.Flag.Value.X);
+                            writer.Write(airbase.Flag.Value.Z);
+                        }
+
+                        writer.Write(airbase.HasCaptureRange ? airbase.CaptureRange : 0f);
+                    }
                 }
             }
         }
+
+        /// <summary>
+        /// Refuses a flag or a capture range the plugin could not use: a flag that is not a place
+        /// on the map, and a range that is not a number or lies outside the game's own slider
+        /// (<see cref="MinCaptureRange"/> to <see cref="MaxCaptureRange"/>) without being 0. The
+        /// reader refuses the same, so what one writes the other takes.
+        /// </summary>
+        static void CheckFlag(AirbasePlacement airbase)
+        {
+            if (airbase.HasFlag && !(Finite(airbase.Flag.Value.X) && Finite(airbase.Flag.Value.Z)))
+                throw new ArgumentException($"airbase '{airbase.UniqueName}' has its flag at no place on the map");
+
+            if (!RangeAllowed(airbase.CaptureRange))
+                throw new ArgumentException($"airbase '{airbase.UniqueName}' has a capture range of {airbase.CaptureRange}; " +
+                                            $"it has to be 0 (automatic) or {MinCaptureRange:0} to {MaxCaptureRange:0} m");
+        }
+
+        /// <summary>Whether a capture range can be written: 0 for automatic, or a radius from
+        /// <see cref="MinCaptureRange"/> to <see cref="MaxCaptureRange"/>.</summary>
+        public static bool RangeAllowed(float range) =>
+            range == 0f || (range >= MinCaptureRange && range <= MaxCaptureRange);
+
+        static bool Finite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
 
         public static List<AirbasePlacement> Read(byte[] bytes)
         {
@@ -229,6 +349,7 @@ namespace CustomMaps
                 int version = SameBytes(magic, Magic, Magic.Length) ? 3
                             : SameBytes(magic, Magic4, Magic4.Length) ? 4
                             : SameBytes(magic, Magic5, Magic5.Length) ? 5
+                            : SameBytes(magic, Magic6, Magic6.Length) ? 6
                             : 0;
                 if (version == 0)
                 {
@@ -292,6 +413,23 @@ namespace CustomMaps
                                     Width = reader.ReadSingle(),
                                 };
                         }
+                    }
+
+                    if (version >= 6)
+                    {
+                        byte placed = reader.ReadByte();
+                        if (placed > 1) throw new InvalidDataException($"airbase {i} has flag marker {placed}");
+
+                        if (placed == 1)
+                        {
+                            float x = reader.ReadSingle(), z = reader.ReadSingle();
+                            if (!Finite(x) || !Finite(z)) throw new InvalidDataException($"airbase {i} has its flag at no place");
+                            airbase.Flag = (x, z);
+                        }
+
+                        airbase.CaptureRange = reader.ReadSingle();
+                        if (!RangeAllowed(airbase.CaptureRange))
+                            throw new InvalidDataException($"airbase {i} claims a capture range of {airbase.CaptureRange}");
                     }
 
                     airbases.Add(airbase);

@@ -26,7 +26,7 @@ namespace CustomMaps
     public sealed class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.javoski.custommaps";
-        public const string Version = "1.2.1";
+        public const string Version = "1.3.0";
 
         internal static Plugin Instance { get; private set; }
         static ManualLogSource _log;
@@ -66,13 +66,16 @@ namespace CustomMaps
             EnsureMapsFolder();
 
             // Opening a bundle only maps its header, so this is milliseconds even for a
-            // 300 MB map; the terrain deserializes on a background request while the
-            // player is still in the menu. Done here rather than lazily so that a
-            // missing or corrupt bundle is reported at startup instead of at the moment
-            // someone tries to host with it.
+            // 1.4 GB map. Its hash, which names it in multiplayer, is worked out on a thread
+            // of its own and the map registered once that is in (SettleWhenHashed); its
+            // terrain is read in the background once a mission on it is on the way
+            // (LoadedMap.BeginWarmUp). Done here rather than lazily so that a missing or
+            // corrupt bundle is reported at startup instead of at the moment someone tries
+            // to host with it.
             try
             {
                 BundleLoader.ScanAndLoad();
+                StartCoroutine(BundleLoader.SettleWhenHashed());
             }
             catch (Exception e)
             {
@@ -262,15 +265,47 @@ namespace CustomMaps
 
             // Degradations, not failures.
             Method(typeof(MapLoader), nameof(MapLoader.TryGetMapName), critical: false);
+            Method(typeof(MissionsPicker), nameof(MissionsPicker.SelectMission), critical: false);
+            Method(typeof(NuclearOption.MissionEditorScripts.MissionEditorLoadMenuV2),
+                   nameof(NuclearOption.MissionEditorScripts.MissionEditorLoadMenuV2.SelectMission), critical: false);
+            Method(typeof(NuclearOption.MissionEditorScripts.MissionEditor),
+                   nameof(NuclearOption.MissionEditorScripts.MissionEditor.LoadEditor), critical: false,
+                   new[] { typeof(NuclearOption.SavedMission.Mission) });
+            Method(typeof(NuclearOption.Networking.Lobbies.SteamLobby),
+                   nameof(NuclearOption.Networking.Lobbies.SteamLobby.TryJoinLobby), critical: false);
+            Field(typeof(NuclearOption.Networking.Lobbies.SteamLobby), "_joinedLobby", critical: false);
             Field(typeof(MapSettings), "factionMusic", critical: false);
             Field(typeof(NuclearOption.Effects.TerrainHeightMap), "terrainPhysicMaterials", critical: false);
             Field(typeof(NuclearOption.Effects.TerrainHeightMap), "terrainMaterials", critical: false);
             Field(typeof(Airbase), AirbaseBuilder.TaxiNetworkField, critical: false);
+            Field(typeof(Airbase), AirbaseBuilder.ServicePointsField, critical: false);
             Method(typeof(DynamicMap), "MapControls", critical: false);
             Method(typeof(MathExtensions), nameof(MathExtensions.ClampPos), critical: false);
             Field(typeof(GameAssets), "loader", critical: false);
             Field(typeof(GameAssets), nameof(GameAssets.WaterMaterial), critical: false);
             Method(typeof(LandingGear), "FixedUpdate", critical: false);
+            Method(typeof(RoadPathfinder), nameof(RoadPathfinder.TryPathfind), critical: false);
+            Method(typeof(Shockwave), "Start", critical: false);
+            Field(typeof(Shockwave), "colliderBuffer", critical: false);
+            Field(typeof(Shockwave), "yieldKilotons", critical: false);
+            Method(typeof(Airbase), nameof(Airbase.LinkSavedAirbase), critical: false);
+            Method(typeof(Airbase), nameof(Airbase.UnlinkSavedAirbase), critical: false);
+            Field(typeof(Airbase), "airbaseSettings", critical: false);
+            Field(typeof(Airbase), "gridSquares", critical: false);
+            Method(typeof(NuclearOption.MissionEditorScripts.AirbasePanel), "Setup", critical: false);
+            Method(typeof(NuclearOption.MissionEditorScripts.AirbasePanel), "CaptureRangeChanged", critical: false);
+            Method(typeof(NuclearOption.MissionEditorScripts.AirbasePanel), "CheckOverride", critical: false);
+            Field(typeof(LandingGear), "aircraft", critical: false);
+            Field(typeof(LevelInfo), "waterPlane", critical: false);
+
+            // A mission's own airbase roads (MissionAirbaseRoads).
+            Field(typeof(NuclearOption.SavedMission.SavedAirbase), "roads", critical: false);
+            Method(typeof(NuclearOption.SavedMission.SavedAirbase), "BeforeSave", critical: false);
+            Field(typeof(NuclearOption.MissionEditorScripts.RoadEditor), "roadNetwork", critical: false);
+            Field(typeof(NuclearOption.MissionEditorScripts.RoadEditor), "placeRoadButton", critical: false);
+            Method(typeof(NuclearOption.MissionEditorScripts.RoadEditor), "VisualizeNetworks", critical: false);
+            foreach (string edit in Patches.MissionAirbaseRoadEditPatch.Edits)
+                Method(typeof(NuclearOption.MissionEditorScripts.RoadEditor), edit, critical: false);
 
             return ok;
         }
@@ -307,6 +342,17 @@ namespace CustomMaps
             // Diagnostics only — turns a silent disconnect into a readable message.
             Patch(harmony, typeof(Patches.JoinFailurePatch), critical: false);
 
+            // A custom map's prefab read in the background from the moment the game shows the map
+            // is about to be played: a mission on it picked, a lobby made for it or joined, its load
+            // begun; and a load inside the mission editor held back, with the editor running, until
+            // it is read. Without them the prefab is read whole, on the main thread, when the map is
+            // enabled.
+            Patch(harmony, typeof(Patches.MapWarmUpPatch), critical: false);
+            Patch(harmony, typeof(Patches.MissionPickWarmUpPatch), critical: false);
+            Patch(harmony, typeof(Patches.EditorMissionPickWarmUpPatch), critical: false);
+            Patch(harmony, typeof(Patches.EditorLoadWaitPatch), critical: false);
+            Patch(harmony, typeof(Patches.LobbyJoinWarmUpPatch), critical: false);
+
             // The M map's pan limit, sized for 82 km maps, widened for larger ones. Without it
             // the edges of a large map cannot be brought to the middle of the screen.
             Patch(harmony, typeof(Patches.MapPanPatch), critical: false);
@@ -316,6 +362,44 @@ namespace CustomMaps
             // water volumes as on tarmac. Without it lakes still hold water; the gear just rolls
             // on them.
             Patch(harmony, typeof(Patches.LandingGearTriggerPatch), critical: false);
+
+            // Room in the game's 4,096-collider shockwave buffer for a nuke over a custom map with
+            // more colliders in reach than it holds. Without it a big warhead there can leave the
+            // buildings it hit standing.
+            // Both skip themselves (Prepare) when the game no longer has the members they use.
+            Patch(harmony, typeof(Patches.BlastBufferMapPatch), critical: false);
+            Patch(harmony, typeof(Patches.ShockwaveBufferPatch), critical: false);
+
+            // A mission's own flag and capture range for a custom map's airbases, set in the
+            // mission editor, over the map's. Without it the map's stand, as the game has it for
+            // any airbase built into a map.
+            Patch(harmony, typeof(Patches.MissionAirbaseLinkPatch), critical: false);
+            Patch(harmony, typeof(Patches.MissionAirbasePanelPatch), critical: false);
+
+            // Measurement only: what each floating-origin shift costs on a custom map, in the log.
+            Patch(harmony, typeof(Patches.ShiftTimingPatch), critical: false);
+            Patch(harmony, typeof(Patches.ShiftTimingMapPatch), critical: false);
+
+            // A mission's own roads for a custom map's airbases, edited in the mission editor's Roads
+            // tool, over the map's. Without them the map's roads stand, shown read-only, as the game has
+            // them for any airbase built into a map. Linking the mission's roads rides on the link patch
+            // above.
+            Patch(harmony, typeof(Patches.MissionAirbaseRoadEditorPatch), critical: false);
+            Patch(harmony, typeof(Patches.MissionAirbaseRoadEditPatch), critical: false);
+            Patch(harmony, typeof(Patches.MissionAirbaseRoadSavePatch), critical: false);
+
+            // A drawn airfield's floor read as paving by AI aircraft taxiing or lining up, whose first and
+            // last legs, and whose take-off turn, the game drives straight whatever its taxi network.
+            // Without it the floors are not grounded at all (MapFixups.GroundAirfieldFloors), and every
+            // aircraft may roll on the grass.
+            Patch(harmony, typeof(Patches.AirfieldTaxiPatch), critical: false);
+
+            // A custom map's road route searches, for ground units and taxiing aircraft, on a heap rather
+            // than the game's loop that sorts every junction at every step: the same routes, in a fraction
+            // of the time on a road network with junctions in the thousands. Both skip themselves (Prepare)
+            // when the game's search is not the one they were checked against.
+            Patch(harmony, typeof(Patches.RoadPathfinderMapPatch), critical: false);
+            Patch(harmony, typeof(Patches.RoadPathfinderPatch), critical: false);
 
             if (!ok)
                 LogError("a critical patch could not be applied, so no maps will be registered. " +
@@ -340,9 +424,10 @@ namespace CustomMaps
             }
         }
 
-        static bool Method(Type type, string name, bool critical)
+        /// <summary><paramref name="parameters"/> picks one overload of a method that has several.</summary>
+        static bool Method(Type type, string name, bool critical, Type[] parameters = null)
         {
-            if (AccessTools.Method(type, name) != null) return true;
+            if (AccessTools.Method(type, name, parameters) != null) return true;
             Report(critical, $"method {type.FullName}.{name} not found");
             return !critical;
         }
@@ -364,9 +449,17 @@ namespace CustomMaps
         internal static void LogWarning(string message) => _log?.LogWarning(message);
         internal static void LogError(string message) => _log?.LogError(message);
 
+        /// <summary>
+        /// Whether <see cref="LogDebug"/> writes anything. Asked first where a debug line costs
+        /// something to make: an interpolated message is built in full, every argument read and
+        /// formatted, before <see cref="LogDebug"/> is even called, and then thrown away when debug
+        /// logging is off.
+        /// </summary>
+        internal static bool DebugEnabled => DebugLogging != null && DebugLogging.Value;
+
         internal static void LogDebug(string message)
         {
-            if (DebugLogging != null && DebugLogging.Value) _log?.LogInfo("[CM-DBG] " + message);
+            if (DebugEnabled) _log?.LogInfo("[CM-DBG] " + message);
         }
     }
 }

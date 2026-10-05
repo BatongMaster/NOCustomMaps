@@ -6,51 +6,56 @@ multiplayer like the built-in maps.
 
 ## Installing
 
-1. Install BepInEx 5 (x64, 5.4.23 or later) into the game folder and start the game once.
-2. Put `NOCustomMaps.dll` in `BepInEx/plugins/NOCustomMaps/`.
-3. Put your `.nomap` files in `BepInEx/plugins/NOCustomMaps/maps/`. The plugin creates this folder
-   the first time the game starts with it installed.
-4. Start the game. `BepInEx/LogOutput.log` lists each map it loaded, with the name missions use for it.
+### NOMM
 
-```
-Nuclear Option/
-└── BepInEx/
-    └── plugins/
-        └── NOCustomMaps/
-            ├── NOCustomMaps.dll
-            └── maps/
-                └── yourmap.nomap
-```
+1. Search on NOMM for "Swiss Alps" and download it (it will take a while don't worry, it's a 1.3 GB download)
+2. Start the game. 'BepInEx/LogOutput.log' should show 'v1.3.0 ready.' and a line like
+'swissalps-0.3.0.nomap -> cm.swissalps.aeb19792 ("Swiss Alps", 199680x199680 m)'.
 
-Maps are also read from a `CustomMaps` folder in the game's persistent data path, and from
-`BepInEx/plugins/NOCustomMaps/addons/`, where the NOMM mod manager installs maps listed as add-ons of
-this plugin.
+###  How to install manually (if you don't use NOMM)
+
+1. Download `swissalps-0.3.0.nomap` from this repository's releases. It is about 1.3 GB.
+2. Create a folder named `NOCustomMaps` in `BepInEx/plugins/`
+3. Copy the map (.nomap) into `BepInEx/plugins/NOCustomMaps/maps/` under your Nuclear Option installation.
+   (`CustomMaps/` under the game's persistent data path works too; the plugin looks in both.)
+4. Start the game once and look in `BepInEx/LogOutput.log` for the line the plugin prints when it
+   registers the map:
+
+   ```
+   swissalps-0.3.0.nomap -> cm.swissalps.<hash8> ("Swiss Alps", 199680x199680 m)
+   ```
+
+   The `cm.swissalps.<hash8>` name is how missions refer to the map. The eight hex digits are the
+   start of the bundle's SHA-256, so they identify this exact build.
+5. In a mission, set `MapKey.Path` to that name and `MapKey.Type` to `GameWorldPrefab`. Missions
+   live in `%USERPROFILE%\AppData\LocalLow\Shockfront\NuclearOption\Missions\<name>\<name>.json`.
+
+**Multiplayer:** the server and every client need the identical `.nomap` file. The hash in the
+registered name is the version handshake - a client with a different build of the map fails to
+match and is told so at join time, instead of silently disagreeing about where the ground is.
+
+Maps installed by the NOMM mod manager (in `addons/`) are found too. Keep only one build of each map
+installed: Unity refuses a second one, and the log says so.
+
+## Making maps
+
+The Unity tools and a guide to making maps are in a separate repository,
+[NOCustomMapsCreator](https://github.com/BatongMaster/NOCustomMapsCreator).
 
 ## Multiplayer
 
-The server and every player need the same `.nomap` file. A map registers as
-`cm.<mapId>.<hash>`, where the hash comes from the file, so a player with a different build of the map
-is turned away when joining. Rebuilding a map changes that name, and missions that use the map must be
-pointed at the new one (`MapKey.Path` in the mission file).
+The server and every player need the same `.nomap` file and should run the same release of this
+plugin. A map registers as `cm.<mapId>.<hash>`, where the hash comes from the file, so a player with a
+different build is turned away when joining. Rebuilding a map changes that name, and missions that use
+it must be pointed at the new one (`MapKey.Path` in the mission file).
 
 ## Airbases
 
-Airfields drawn in Unity become airbases built into the map, with their runways, taxi exits and
-capture zone. They come without buildings. To give an airbase spawns, place hangars, revetments,
-shelters or helipads in the mission editor and add them to the airbase's **Buildings** list.
-
-## Configuration
-
-`BepInEx/config/com.javoski.custommaps.cfg`:
-
-| Key | Default | Meaning |
-|---|---|---|
-| `MapDirectories` | empty | Extra folders to search for maps, separated by `;` |
-| `DebugLogging` | `false` | More detail in the log |
-| `ValidateOnLoad` | `true` | Skip a map that fails its checks |
-| `DonorMap` | `Terrain1` | Built-in map whose terrain materials and music are used |
-
-Delete the file to get new defaults after an update.
+Airfields drawn in Unity become airbases with their runways, runway paint, AI taxi roads and capture
+zone. They come without buildings: place hangars, revetments, shelters or helipads in the mission
+editor and add them to the airbase's **Buildings** list. A mission can also move an airbase's flag,
+change its capture range and edit its AI roads in the mission editor; **Remove overrides** hands them
+back to the map.
 
 ## Building
 
@@ -64,23 +69,8 @@ dotnet test tests/CustomMaps.Tests/CustomMaps.Tests.csproj -c Release
 dotnet build CustomMaps.csproj -c Release
 ```
 
-The DLL is written to `bin/Release/netstandard2.1/NOCustomMaps.dll` and copied into the game's
-`BepInEx/plugins/NOCustomMaps/`. Close the game first, since it locks the DLL. Set a different
-destination with `-p:DeployDir=<path>`, or turn the copy off with `-p:DeployDir=`. If the game is
-installed elsewhere, set `ManagedDir` and `BepInExDir` the same way.
-
-## Source layout
-
-| Path | Contents |
-|---|---|
-| `Plugin.cs`, `Patches/` | Entry point, settings and Harmony patches |
-| `BundleLoader.cs`, `MapRegistrar.cs` | Finding, opening and registering maps |
-| `MapFixups.cs` | Preparing each map: materials, grass and trees, lakes, decals |
-| `AirbaseBuilder.cs` | Airbases and runways |
-| `CityBuilder.cs`, `CityTileGate.cs`, `RoadNetworkFixup.cs` | Buildings and the road network |
-| `MapDiagnostics.cs` | The check report written to the log for each map |
-| `Core/` | File formats and logic shared with Unity tools, with no game or Unity code |
-| `tests/` | Tests for `Core/` |
+The DLL is copied into the game's `BepInEx/plugins/NOCustomMaps/`; close the game first. Turn the copy
+off with `-p:DeployDir=`, and if the game is installed elsewhere set `ManagedDir` and `BepInExDir`.
 
 ## Disclaimer
 

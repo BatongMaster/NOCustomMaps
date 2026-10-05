@@ -28,6 +28,40 @@
   -->
   <ItemGroup>
     <Compile Include="..\..\Core\**\*.cs" LinkBase="Production\Core" />
+    <!-- Pure arithmetic outside Core/, plugin-only, so it has no copy in NOMapForge. -->
+    <Compile Include="..\..\BlastReach.cs" Link="Production\BlastReach.cs" />
+    <!-- What each floating-origin shift cost, and the log's lines about it; ShiftTiming feeds it
+         from the game's player loop. -->
+    <Compile Include="..\..\ShiftStats.cs" Link="Production\ShiftStats.cs" />
+    <!-- The one piece of the plugin's own logic free of game types: how a mission's choice of
+         an airbase flag and capture range is told from a copy of the map's. -->
+    <Compile Include="..\..\AirbaseChoice.cs" Link="Production\AirbaseChoice.cs" />
+    <!-- The validation block's line about a map's buildings, worded apart from the game's types. -->
+    <Compile Include="..\..\BuildingsReport.cs" Link="Production\BuildingsReport.cs" />
+    <!-- A bundle's full-file SHA-256, its map's multiplayer identity, and the cache that remembers it
+         between starts; run against real files. -->
+    <Compile Include="..\..\BundleHash.cs" Link="Production\BundleHash.cs" />
+    <!-- Which installed bundle a map key starts reading in the background. -->
+    <Compile Include="..\..\WarmUpPolicy.cs" Link="Production\WarmUpPolicy.cs" />
+    <!-- Which loaded materials the shader-name fallbacks pass over: copies owned by a map on its way out. -->
+    <Compile Include="..\..\MaterialNames.cs" Link="Production\MaterialNames.cs" />
+    <!-- What an airbase is built from its taxi lanes: its roads, each runway's exits and which way
+         each faces, its service point and landing pad. -->
+    <Compile Include="..\..\TaxiPlan.cs" Link="Production\TaxiPlan.cs" />
+    <!-- How a mission's own airbase roads are told from a copy of the map's, and the runway exits
+         made for them. -->
+    <Compile Include="..\..\MissionTaxiRoads.cs" Link="Production\MissionTaxiRoads.cs" />
+    <!-- The cells a map's buildings are filed under, and each building's collision box: where it
+         stands, which way it faces, and the merged mesh of a cell's boxes. -->
+    <Compile Include="..\..\CityProxies.cs" Link="Production\CityProxies.cs" />
+    <!-- The load passes' names: which surface a map's placeholder material asks for, and which
+         subtree a renderer sits in with each transform's name read once. -->
+    <Compile Include="..\..\MaterialMarkers.cs" Link="Production\MaterialMarkers.cs" />
+    <Compile Include="..\..\AncestorNames.cs" Link="Production\AncestorNames.cs" />
+    <!-- The road route search the plugin answers the game's RoadPathfinder with on a custom map, and the
+         fingerprint that keeps it to the game build it was checked against. -->
+    <Compile Include="..\..\RoadPathSearch.cs" Link="Production\RoadPathSearch.cs" />
+    <Compile Include="..\..\IlFingerprint.cs" Link="Production\IlFingerprint.cs" />
   </ItemGroup>
 
 </Project>

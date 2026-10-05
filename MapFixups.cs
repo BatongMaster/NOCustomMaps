@@ -41,7 +41,19 @@ namespace CustomMaps
             return _prepared.TryGetValue(map.PrefabName, out MapSettings prefab) ? prefab : null;
         }
 
-        public static void PrepareAll(MapSettingsManager manager)
+        /// <summary>
+        /// Prepares the custom map <paramref name="mapName"/>, which <c>EnableMap</c> is about to
+        /// enable, once per session. A shipped map's name, or one of ours already prepared or
+        /// rejected, prepares nothing.
+        ///
+        /// Only that map. This used to prepare every installed map at the first <c>EnableMap</c> of
+        /// any, Heartland included, and preparing a map reads its whole prefab
+        /// (<c>LoadedMap.Root</c>): 6 s and 2.5 GB for Swiss Alps, whether or not it was played.
+        /// The shipped maps the preparation borrows from are prefabs, reachable from the manager
+        /// whichever map is in the scene, and what it resolves from them is resolved once per
+        /// session, so a map prepared after another was played is prepared the same.
+        /// </summary>
+        public static void PrepareFor(MapSettingsManager manager, string mapName)
         {
             if (manager == null || Plugin.Disabled) return;
             if (BundleLoader.Maps.Count == 0) return;
@@ -50,7 +62,7 @@ namespace CustomMaps
 
             foreach (LoadedMap map in BundleLoader.Maps)
             {
-                if (map.PrefabName == null) continue;
+                if (map.PrefabName == null || !string.Equals(map.PrefabName, mapName, StringComparison.Ordinal)) continue;
                 if (_prepared.ContainsKey(map.PrefabName) || _rejected.Contains(map.PrefabName)) continue;
 
                 try
@@ -190,6 +202,7 @@ namespace CustomMaps
             }
 
             MeshCollider[] colliders = scope.GetComponentsInChildren<MeshCollider>(true);
+            AncestorNames<Transform> sections = Sections(RoadRoot, AirfieldRoot);
             int rebound = 0, relayered = 0, skipped = 0;
 
             foreach (MeshCollider collider in colliders)
@@ -199,8 +212,8 @@ namespace CustomMaps
                 // outside this scope anyway, but the fallback above widens it to the whole
                 // map when the terrain root cannot be found, and a warning nobody reads
                 // would then quietly cost every vehicle its road speed.
-                if (Under(collider.transform, RoadRoot)) { skipped++; continue; }
-                if (Under(collider.transform, AirfieldRoot)) { skipped++; continue; }
+                if (sections.Under(collider.transform, RoadRoot)) { skipped++; continue; }
+                if (sections.Under(collider.transform, AirfieldRoot)) { skipped++; continue; }
 
                 if (_terrainPhysicMaterial != null && collider.sharedMaterial != _terrainPhysicMaterial)
                 {
@@ -225,8 +238,88 @@ namespace CustomMaps
 
             Plugin.LogDebug($"{root.name}: {colliders.Length} MeshCollider(s), {rebound} rebound to the terrain PhysicMaterial" +
                             (skipped > 0 ? $", {skipped} road ribbon(s) left unmaterialised" : ""));
-            return rebound;
+
+            int grounded = GroundAirfieldFloors(root);
+            if (grounded > 0)
+                Plugin.LogInfo($"{grounded} airfield floor(s) given the terrain PhysicMaterial: the grass inside an " +
+                               "airfield is ground, where landing gear sinks and breaks as on the base game's grass");
+
+            return rebound + grounded;
         }
+
+        /// <summary>
+        /// Gives each airfield's floor the terrain PhysicMaterial, so that the grass inside a drawn
+        /// airfield is grass to the game and not paving.
+        ///
+        /// NOMapForge lays under every drawn airfield's outline an invisible floor, a
+        /// <c>MeshCollider</c> with no renderer, 1 cm over the ground, so that an aircraft in a
+        /// hangar (<c>hangar_med</c> has no floor of its own) would not stand on the terrain. It
+        /// shipped with no PhysicMaterial, and under <see cref="AirfieldRoot"/> it kept none, so it
+        /// was paving over the whole field. <c>LandingGear.FixedUpdate</c> (decompiled) casts one line
+        /// down from each strut and takes the first collider it meets; unless that collider's
+        /// <c>sharedMaterial</c> is <c>GameAssets.i.terrainMaterial</c> the wheel is on tarmac.
+        /// Off tarmac it sinks by the tyre's pressure, the strut's force over its own
+        /// <c>contactArea</c>, and is dragged back by a force growing with the square of the sink,
+        /// the square of the pressure and the wheel's speed; past the strut's <c>springRate</c>, or
+        /// with the strut compressed past <c>maxCompression</c> or its hinge bent past 10 degrees,
+        /// the gear breaks. No aircraft is named anywhere in that: whichever aircraft the base game
+        /// spares on grass (the user names the Cricket and the Compass) it spares through their own
+        /// gear's numbers, and it does the same here. The user found the difference: on this map
+        /// any aircraft taxied, took off and landed on the grass beside the runway, where on the base
+        /// game's maps most lose their gear.
+        ///
+        /// A floor is told from paving by having no <c>Renderer</c> on its object (the runway and the
+        /// tarmac are drawn). With the terrain's material it is the ground it lies a centimetre over:
+        /// soft for a wheel, off-road for a vehicle, dust for an impact. The paving (6 and 7 cm up),
+        /// the road ribbons (2 to 5 cm) and the bridges and tunnels keep a null material, so a wheel
+        /// that meets them first is on tarmac as before. The cost is the reason the floor was laid: an
+        /// aircraft in a hangar a mission stands on grass sinks, and breaks its gear rolling out over
+        /// the grass, as it would in a hangar on the base game's grass. Hangars go on the aprons.
+        ///
+        /// Only with <see cref="Patches.AirfieldTaxiPatch"/> in place. A custom airbase's AI keeps to its
+        /// taxi network but drives its first and last legs, and its take-off turn, straight across
+        /// whatever lies there; that patch lets an aircraft taxiing or lining up under AI control meet
+        /// the floor as paving. Without it the
+        /// floors stay paved, as before, rather than strand every heavy AI aircraft with broken gear.
+        /// </summary>
+        /// <returns>How many floors were given the material.</returns>
+        static int GroundAirfieldFloors(GameObject root)
+        {
+            if (_terrainPhysicMaterial == null) return 0;
+
+            Transform airfields = root.transform.Find(AirfieldRoot);
+            if (airfields == null) return 0;
+
+            if (!Patches.AirfieldTaxiPatch.Applied)
+            {
+                Plugin.LogWarning("the airfields' floors are left paved, since the AI taxi patch on LandingGear is not in " +
+                                  "place: every aircraft can roll on the grass inside a drawn airfield");
+                return 0;
+            }
+
+            int grounded = 0;
+            foreach (MeshCollider collider in airfields.GetComponentsInChildren<MeshCollider>(true))
+            {
+                if (!IsAirfieldFloor(collider)) continue;
+
+                // Marked once here, so the wheel patch knows a floor by a component rather than by
+                // walking its parents' names every physics step (AirfieldFloorMark says why).
+                if (collider.GetComponent<AirfieldFloorMark>() == null) collider.gameObject.AddComponent<AirfieldFloorMark>();
+
+                if (collider.sharedMaterial == _terrainPhysicMaterial) continue;
+
+                collider.sharedMaterial = _terrainPhysicMaterial;
+                grounded++;
+            }
+
+            return grounded;
+        }
+
+        /// <summary>True for an airfield's floor: a collider under <see cref="AirfieldRoot"/> with
+        /// nothing on its object to draw it, which is ground rather than paving
+        /// (<see cref="GroundAirfieldFloors"/>).</summary>
+        public static bool IsAirfieldFloor(Collider collider)
+            => collider != null && collider.GetComponent<Renderer>() == null && Under(collider.transform, AirfieldRoot);
 
         /// <summary>True if any ancestor, or the transform itself, carries this name.</summary>
         static bool Under(Transform transform, string name)
@@ -236,6 +329,15 @@ namespace CustomMaps
 
             return false;
         }
+
+        /// <summary>
+        /// <see cref="Under"/> for a pass that asks it of many transforms: which of these names a
+        /// transform or any of its ancestors carries, with each transform's name read once for the
+        /// whole pass (<see cref="AncestorNames{T}"/>). Made afresh for each pass, so it never answers
+        /// for a hierarchy that has changed since.
+        /// </summary>
+        internal static AncestorNames<Transform> Sections(params string[] names)
+            => new AncestorNames<Transform>(at => at.parent, at => at.name, names);
 
         /// <summary>
         /// Fills the raised lakes with water: gives every <c>BoxCollider</c> under the map's
@@ -540,10 +642,15 @@ namespace CustomMaps
         static bool IsTerrainRenderer(MeshRenderer renderer, PhysicMaterial[] physicMaterials, Material[] materials)
         {
             if (renderer.TryGetComponent(out MeshCollider collider) && physicMaterials != null)
+            {
+                PhysicMaterial own = collider.sharedMaterial;
                 foreach (PhysicMaterial candidate in physicMaterials)
-                    if (collider.sharedMaterial == candidate) return true;
+                    if (own == candidate) return true;
+            }
 
-            if (materials == null) return false;
+            // Asked before the renderer's materials are read, which allocates a new array for each
+            // renderer on the map: both shipped maps leave this list empty, so nothing can match.
+            if (materials == null || materials.Length == 0) return false;
 
             foreach (Material assigned in renderer.sharedMaterials)
                 foreach (Material candidate in materials)
@@ -564,7 +671,7 @@ namespace CustomMaps
         static void Rewire(GameObject clone, MapSettings instance, Transform terrain)
         {
             float heightMax = HeightBakeCeilingFor(instance);
-            int blockers = 0;
+            var blocked = new GrassBlocking();
 
             foreach (TerrainHeightMap heightMap in clone.GetComponentsInChildren<TerrainHeightMap>(true))
             {
@@ -583,8 +690,28 @@ namespace CustomMaps
                 heightMap.AutoSearchRoot = terrain != null ? terrain : instance.transform;
                 heightMap.AutoFindTerrain = true;
 
-                blockers += BlockGrass(heightMap, instance.transform);
+                // No padding round the grass blockers. The game's blocker shader
+                // (Hidden/TerrainBlocker) moves every vertex blockerPadding metres, 1 in the
+                // donor, straight away from its mesh's pivot. A base-game object is pivoted at
+                // its centre, so that grows it by a metre all round; this map's road chunks,
+                // bridges, tunnels, paving and grass blockers are pivoted at their terrain tile's
+                // south-west corner, kilometres off, so it slid every one of them up to a metre
+                // sideways instead: one edge of each road pulled onto the tarmac, which is where
+                // the grass on the roads grew. The blockers carry their own margin now, so none
+                // is wanted. Read only by SetBlockerMaterialProps, from CommandSetup, which
+                // DetailRenderer calls from Start, long after this (the clone is still under its
+                // inactive staging holder here), and again whenever the player switches grass
+                // back on, which reads the same field. Only this map's cloned TerrainHeightMap is
+                // touched; the cost is that a building a mission places here, whose own
+                // TerrainHeightMapBlocker registers it, keeps grass off its footprint alone
+                // rather than a metre round it.
+                heightMap.blockerPadding = 0f;
+
+                blocked.Add(BlockGrass(heightMap, instance.transform));
             }
+
+            foreach (GrassRenderer grass in clone.GetComponentsInChildren<GrassRenderer>(true))
+                UseGrassMask(grass, instance);
 
             foreach (ShaderGlobalManager globals in clone.GetComponentsInChildren<ShaderGlobalManager>(true))
                 globals.mapSettings = instance;
@@ -594,13 +721,33 @@ namespace CustomMaps
 
             // Silent when it fails, like the terrain recognition beside it, and with the same
             // consequence: grass growing through the tarmac with nothing to say why.
-            if (blockers > 0) Plugin.LogInfo($"grass blocked by {blockers} paved surface(s)");
-            else if (clone.transform.Find(RoadRoot) != null)
+            if (blocked.Shipped > 0)
+                Plugin.LogInfo($"grass blocked by {blocked.Shipped} grass blocker(s) and {blocked.Paved} " +
+                               "airfield surface(s), no padding");
+            else if (blocked.Paved > 0)
+                Plugin.LogInfo($"grass blocked by {blocked.Paved} paved surface(s), no padding; this bundle " +
+                               "ships no grass blockers, so there is no verge and bridge ends grow grass " +
+                               "(rebuild the map)");
+            else if (instance.transform.Find(RoadRoot) != null)
                 Plugin.LogWarning("no paved surface registered as a grass blocker; grass will grow on the roads");
         }
 
+        /// <summary>What <see cref="BlockGrass"/> registered: how many of the bundle's grass
+        /// blockers, and how many paved surfaces besides them or in their place.</summary>
+        struct GrassBlocking
+        {
+            public int Shipped, Paved;
+
+            public void Add(GrassBlocking other)
+            {
+                Shipped += other.Shipped;
+                Paved += other.Paved;
+            }
+        }
+
         /// <summary>
-        /// Registers the map's paved surfaces as grass blockers, and returns how many.
+        /// Registers the map's grass blockers, or where it ships none its paved surfaces, and
+        /// returns how many of each.
         ///
         /// Grass does not test colliders. <c>GrassRenderer</c> reads
         /// <c>TerrainHeightMap.blockerMap</c>, which <c>BakeWindow</c> clears to white and
@@ -617,33 +764,308 @@ namespace CustomMaps
         ///
         /// Only the finest level of each surface is registered. The coarser ones cover the
         /// same ground, and bridges and tunnels are left out on purpose: a tunnel liner lies
-        /// under the hill and a deck well above it, so blocking on either would shave a
-        /// grassless stripe along a mountainside that has a road inside it.
+        /// under the hill and a deck well above it, and the blocker shader turns a blocker away
+        /// only where it stands more than <c>blockerHeightVertThreshold</c> (100 m in the
+        /// donor) over the ground, so either would shave a grassless stripe along a
+        /// mountainside that has a road inside it, or under a viaduct.
+        ///
+        /// <para>A bundle built since 2026-09-28 ships its own grass blockers under
+        /// <see cref="GrassBlockerRoot"/>, one invisible mesh per terrain tile, and they stand in
+        /// for everything under <see cref="RoadRoot"/>: each road's corridor with a verge either
+        /// side of it (a tuft is tested at its grid point, then moved up to 0.8 m and drawn up
+        /// to a couple of metres across, so a blocker that stops at the road's edge leaves tufts
+        /// leaning over it), each bridge deck wherever it lies low enough for grass under it to
+        /// come through (every deck's ends lie on the ground), and each tunnel's floor where the
+        /// ground is at it (its open mouths), never where a hill stands over it. They are laid
+        /// flat under the ground, so the height test passes wherever they are drawn and their
+        /// plan alone says where grass may not grow. They are registered on an active object with
+        /// the renderer switched off (<see cref="HideBlocker"/>): the game files each blocker in
+        /// its spatial grid by <c>Renderer.bounds</c>, and draws its mesh itself. A bundle without
+        /// them keeps the road ribbons as its blockers, as before. The airfield paving is
+        /// registered either way.</para>
         /// </summary>
-        static int BlockGrass(TerrainHeightMap heightMap, Transform root)
+        static GrassBlocking BlockGrass(TerrainHeightMap heightMap, Transform root)
         {
-            int registered = 0;
+            var registered = new GrassBlocking();
+            int switchedOff = 0, empty = 0, forced = 0;
+            MeshRenderer sample = null;
 
-            foreach (string branch in new[] { RoadRoot, AirfieldRoot })
+            Transform shipped = root.Find(GrassBlockerRoot);
+            if (shipped != null)
+                foreach (MeshRenderer renderer in shipped.GetComponentsInChildren<MeshRenderer>(true))
+                {
+                    if (!renderer.TryGetComponent(out MeshFilter filter) || filter.sharedMesh == null) continue;
+
+                    if (!renderer.gameObject.activeSelf) renderer.gameObject.SetActive(true);
+                    switch (HideBlocker(renderer, filter.sharedMesh))
+                    {
+                        case BlockerHidden.SwitchedOff:
+                            switchedOff++;
+                            if (sample == null) sample = renderer;
+                            break;
+                        case BlockerHidden.Empty: empty++; break;
+                        default: forced++; break;
+                    }
+
+                    heightMap.RegisterObject(new TerrainHeightMap.RenderFilter(
+                        renderer, TerrainHeightMap.SubmeshFilter.All, TerrainHeightMap.EntryType.Blocker));
+                    registered.Shipped++;
+                }
+
+            // What HideBlocker's check found, for a player's log to confirm: it was only ever seen in
+            // the editor. Built only when it will be printed: the sample's name and bounds are read
+            // for nothing otherwise.
+            if (registered.Shipped > 0 && Plugin.DebugEnabled)
+                Plugin.LogDebug($"{switchedOff} grass blocker(s) switched off with their bounds intact" +
+                                (sample != null ? $" ('{sample.name}': {sample.bounds})" : "") +
+                                (empty > 0 ? $", {empty} with an empty mesh switched off unchecked" : "") +
+                                (forced > 0 ? $", {forced} kept from drawing by forceRenderingOff instead" : ""));
+
+            AncestorNames<Transform> sections = Sections(BridgeRoot, TunnelRoot);
+            foreach (string branch in registered.Shipped > 0 ? new[] { AirfieldRoot } : new[] { RoadRoot, AirfieldRoot })
             {
                 Transform under = root.Find(branch);
                 if (under == null) continue;
 
                 foreach (MeshRenderer renderer in under.GetComponentsInChildren<MeshRenderer>(true))
                 {
-                    if (renderer.name.EndsWith("_LOD1", StringComparison.Ordinal) ||
-                        renderer.name.EndsWith("_LOD2", StringComparison.Ordinal)) continue;
+                    string name = renderer.name;
+                    if (name.EndsWith("_LOD1", StringComparison.Ordinal) ||
+                        name.EndsWith("_LOD2", StringComparison.Ordinal)) continue;
 
-                    if (Under(renderer.transform, BridgeRoot) || Under(renderer.transform, TunnelRoot)) continue;
+                    if (sections.Under(renderer.transform, BridgeRoot) || sections.Under(renderer.transform, TunnelRoot))
+                        continue;
 
                     heightMap.RegisterObject(new TerrainHeightMap.RenderFilter(
                         renderer, TerrainHeightMap.SubmeshFilter.All, TerrainHeightMap.EntryType.Blocker));
-                    registered++;
+                    registered.Paved++;
                 }
             }
 
             return registered;
         }
+
+        /// <summary>Set once a grass blocker's bounds have failed <see cref="HideBlocker"/>'s check, so
+        /// the warning is given once a session rather than once a blocker.</summary>
+        static bool _blockerBoundsWarned;
+
+        /// <summary>How <see cref="HideBlocker"/> kept a grass blocker from drawing.</summary>
+        enum BlockerHidden
+        {
+            /// <summary>Renderer switched off, its bounds seen to hold.</summary>
+            SwitchedOff,
+            /// <summary>Renderer switched off unchecked: its mesh has empty bounds, so its renderer's
+            /// are empty whether it is on or off, and it draws nothing wherever it is filed.</summary>
+            Empty,
+            /// <summary>Renderer left on and kept from drawing by <c>forceRenderingOff</c>, as every
+            /// blocker was before, because its bounds did not hold once it was switched off.</summary>
+            Forced,
+        }
+
+        /// <summary>
+        /// Keeps a grass blocker from drawing by switching its renderer off, or, should Unity then lose
+        /// its bounds, by <c>forceRenderingOff</c> as every blocker was kept before.
+        ///
+        /// Switched off is the cheaper of the two. A renderer kept from drawing by
+        /// <c>forceRenderingOff</c> stays in Unity's renderer update, which every origin shift sends
+        /// through every renderer that moved, some 700 blockers on Swiss Alps; a switched-off one drops
+        /// out of it. (A player's profile of one shift on Swiss Alps put 6.3 ms in that update; the
+        /// performance pass's bench, 2026-10-04, had no graphics device, so the blockers' share of it
+        /// was not timed.) And the game asks nothing else of a blocker's renderer:
+        /// <c>TerrainHeightMap</c> (decompiled) files it in its spatial grid by <c>Renderer.bounds</c>,
+        /// at <c>DetailRenderer.Start</c> and again whenever the grass is switched back on, and
+        /// <c>BakeWindow</c> draws its mesh itself, with the transform's matrix, never asking whether
+        /// the renderer is enabled. The GameObject stays active, as before.
+        ///
+        /// What this rests on is that Unity keeps a switched-off renderer's bounds. It did in the
+        /// editor, for all 709 of Swiss Alps 0.4.0's blockers: after one origin shift and after five
+        /// with no read between them, with the datum over 100 km out, and with the map or the
+        /// blocker's own object inactive while it moved. But it was never seen in a player. So each
+        /// blocker's bounds are checked against its mesh's as it is switched off
+        /// (<see cref="BoundsHold"/>), and one whose are empty or elsewhere is switched back on and
+        /// kept from drawing as before, with one warning a session: filed by empty bounds, it would
+        /// leave grass growing on the road it covers. The check is made here only. That the bounds go
+        /// on following later origin shifts, which the game reads again whenever the grass is switched
+        /// back on, rests on the editor alone; switching grass off and on after a shift in game is
+        /// what would show it.
+        ///
+        /// A blocker whose mesh has empty bounds (no vertices, or all at one point) is switched off
+        /// unchecked: its renderer's bounds are empty switched on or off, so the check would fail on
+        /// it and blame Unity, and it draws nothing wherever the game files it.
+        /// </summary>
+        static BlockerHidden HideBlocker(MeshRenderer renderer, Mesh mesh)
+        {
+            renderer.enabled = false;
+            if (mesh.bounds.extents == Vector3.zero) return BlockerHidden.Empty;
+            if (BoundsHold(renderer, mesh, out Bounds got, out Bounds want)) return BlockerHidden.SwitchedOff;
+
+            renderer.enabled = true;
+            renderer.forceRenderingOff = true;
+
+            if (!_blockerBoundsWarned)
+            {
+                _blockerBoundsWarned = true;
+                Plugin.LogWarning($"grass blocker '{renderer.name}' switched off reports bounds {got}, not its mesh's {want}; " +
+                                  "it and any other that does are kept from drawing with forceRenderingOff instead");
+            }
+
+            return BlockerHidden.Forced;
+        }
+
+        /// <summary>
+        /// True if a renderer's bounds are its mesh's bounds where its transform puts them, which is how
+        /// Unity computes a mesh renderer's bounds: nothing empty, nothing left where the object was.
+        ///
+        /// Within a metre: the bounds are compared in single-precision world coordinates up to a hundred
+        /// kilometres out, and the game files them into cells hundreds of metres across.
+        /// </summary>
+        static bool BoundsHold(Renderer renderer, Mesh mesh, out Bounds got, out Bounds want)
+        {
+            got = renderer.bounds;
+
+            Bounds local = mesh.bounds;
+            Matrix4x4 m = renderer.localToWorldMatrix;
+            Vector3 e = local.extents;
+            want = new Bounds(m.MultiplyPoint3x4(local.center), 2f * new Vector3(
+                Mathf.Abs(m.m00) * e.x + Mathf.Abs(m.m01) * e.y + Mathf.Abs(m.m02) * e.z,
+                Mathf.Abs(m.m10) * e.x + Mathf.Abs(m.m11) * e.y + Mathf.Abs(m.m12) * e.z,
+                Mathf.Abs(m.m20) * e.x + Mathf.Abs(m.m21) * e.y + Mathf.Abs(m.m22) * e.z));
+
+            const float Tolerance = 1f;
+            return got.extents != Vector3.zero &&
+                   (got.center - want.center).sqrMagnitude <= Tolerance * Tolerance &&
+                   (got.extents - want.extents).sqrMagnitude <= Tolerance * Tolerance;
+        }
+
+        /// <summary>
+        /// Makes the grass grow where this map's own ground cover says, when the bundle carries its
+        /// grass mask, rather than where the donor's does.
+        ///
+        /// Grass reads neither the splat maps the ground is drawn with nor anything else of the map's:
+        /// where it grows at all comes from <c>GrassRenderer.lushMaps</c>, single-channel masks the
+        /// <c>GrassGenerator</c> compute shader samples at <c>uv = position / MapSize + 0.5</c> and
+        /// turns into the chance of a tuft on each square metre. The clone brings Heartland's,
+        /// <c>terrain1_mask_grass</c>, 512² of Heartland's meadows and forests, which then lies
+        /// stretched over this map: on Swiss Alps no grass on two thirds of the ground its cover calls
+        /// grass or undergrowth, and some on a fifth of its rock. NOMapForge builds the map's own from
+        /// its splats and ships it as <c>&lt;mapId&gt;<see cref="GrassMaskSuffix"/></c>.
+        ///
+        /// Every entry is replaced, not only the first: each kind of tuft names its entry by index
+        /// (<c>GrassConfig.LushTextureIndex</c>; all three of the donor's name 0, its only one), and an
+        /// entry left over would be Heartland's for some kind of grass. The same texture in every
+        /// entry also meets the one thing the game asks of them, that they be one size: it blits them
+        /// all into one R8 texture array the size of the first, and logs an error for any that
+        /// differs. It reads <c>lushMaps</c> in <c>CommandSetup</c>, each time the grass is switched
+        /// on, which <c>DetailRenderer</c> first does from <c>Start</c>, long after this: the clone is
+        /// still under its inactive staging holder here. A bundle without the mask keeps the donor's,
+        /// exactly as before.
+        /// </summary>
+        static void UseGrassMask(GrassRenderer grass, MapSettings instance)
+        {
+            Texture2D[] donor = grass.lushMaps;
+            string was = donor != null && donor.Length > 0 && donor[0] != null ? $"'{donor[0].name}'" : "none";
+
+            Texture2D mask = GrassMaskOf(LoadedMapFor(instance));
+            if (mask == null)
+            {
+                Plugin.LogInfo($"this bundle ships no grass mask, so grass grows where the donor's {was} says, " +
+                               "stretched over this map (rebuild the map)");
+                return;
+            }
+
+            // An empty list would make CommandSetup throw on its first entry; leave it to fail as the
+            // donor would, rather than invent an array the donor never had.
+            if (donor == null || donor.Length == 0)
+            {
+                Plugin.LogWarning($"the donor's grass renderer has no lush map to replace; '{mask.name}' is not used");
+                return;
+            }
+
+            var ours = new Texture2D[donor.Length];
+            for (int i = 0; i < ours.Length; i++) ours[i] = mask;
+            grass.lushMaps = ours;
+
+            Plugin.LogInfo($"grass grows where this map's own mask '{mask.name}' ({mask.width}x{mask.height} " +
+                           $"{mask.format}) says, in place of the donor's {was}");
+
+            // Said here, where the mask is loaded anyway, rather than in the validation block, which
+            // runs for every installed map in the menu and so only asks whether the bundle has one
+            // (ShipsGrassMask). The game blits the mask into an R8 array of its own, sampling it as a
+            // shader does, so an sRGB one is decoded on the way and a meadow grows well under what
+            // the map was built to.
+            if (UnityEngine.Experimental.Rendering.GraphicsFormatUtility.IsSRGBFormat(mask.graphicsFormat))
+                Plugin.LogWarning($"'{mask.name}' is sRGB: the grass reads it decoded and grows less than the map means");
+        }
+
+        /// <summary>
+        /// Whether this map's bundle carries a grass mask, asked of the bundle's list of names
+        /// rather than by loading it.
+        ///
+        /// For the validation block, which <see cref="Prepare"/> prints for every installed map at
+        /// registration, in the menu, whether or not it is ever played. Loading the mask to answer
+        /// read it off disk and up to the graphics card for each, 16 MB for Swiss Alps' 4096² R8,
+        /// and kept it there until something unloaded unused assets. The names are the assets'
+        /// paths as the build tagged them, in lower case; <c>LoadAsset</c> finds an asset by the
+        /// file name at the end of its path, without the extension, which is what this compares.
+        /// </summary>
+        public static bool ShipsGrassMask(LoadedMap map)
+        {
+            if (map?.Bundle == null || string.IsNullOrEmpty(map.Manifest?.MapId)) return false;
+
+            string wanted = map.Manifest.MapId + GrassMaskSuffix;
+            try
+            {
+                foreach (string path in map.Bundle.GetAllAssetNames())
+                    if (string.Equals(System.IO.Path.GetFileNameWithoutExtension(path), wanted,
+                                      StringComparison.OrdinalIgnoreCase))
+                        return true;
+            }
+            catch (Exception e)
+            {
+                Plugin.LogWarning($"{map.Name()}: could not list the bundle's assets ({e.GetType().Name}: {e.Message})");
+            }
+
+            return false;
+        }
+
+        /// <summary>This map's grass mask from its bundle, or null for a bundle without one.</summary>
+        public static Texture2D GrassMaskOf(LoadedMap map)
+        {
+            if (map?.Bundle == null || string.IsNullOrEmpty(map.Manifest?.MapId)) return null;
+
+            // Asked of the bundle directly rather than through LoadedMap.Asset, which warns about a
+            // missing name: every bundle built before the mask lacks it, and that is not a fault.
+            try
+            {
+                return map.Bundle.LoadAsset<Texture2D>(map.Manifest.MapId + GrassMaskSuffix);
+            }
+            catch (Exception e)
+            {
+                Plugin.LogWarning($"{map.Name()}: could not load its grass mask ({e.GetType().Name}: {e.Message}); " +
+                                  "the grass keeps the donor's");
+                return null;
+            }
+        }
+
+        /// <summary>The bundle a live map instance came from, or null if it is not one of ours. Only
+        /// maps already prepared are matched, so asking never reads a map's prefab.</summary>
+        internal static LoadedMap LoadedMapFor(MapSettings instance)
+        {
+            foreach (LoadedMap map in BundleLoader.Maps)
+            {
+                MapSettings prefab = PreparedPrefabFor(map);
+                if (prefab == null) continue;
+
+                // The instance is a clone, so its name carries the prefab's with a suffix.
+                if (instance.name.StartsWith(prefab.name, StringComparison.Ordinal)) return map;
+            }
+
+            return null;
+        }
+
+        /// <summary>Whether a live map instance is one of ours (<see cref="LoadedMapFor"/>), for the
+        /// patches that act on custom maps only and are told when a map is applied.</summary>
+        internal static bool IsCustom(MapSettings instance) => instance != null && LoadedMapFor(instance) != null;
 
         /// <summary>
         /// Points the donor's tree renderers at this map's forests, or takes them out.
@@ -682,12 +1104,15 @@ namespace CustomMaps
                 foreach (TreeRenderer tree in trees)
                 {
                     // Named so the log can tell "we replaced Heartland's" from "there was
-                    // nothing there to replace", which are different bugs.
-                    int donor = tree.PositionData != null ? tree.PositionData.bytes.Length / TreePositionStride : 0;
-                    tree.PositionData = scatter;
+                    // nothing there to replace", which are different bugs. Counted by dataSize,
+                    // never TextAsset.bytes, which copies the whole asset onto the heap at every
+                    // read (30 MB for Swiss Alps' scatter, 6.6 MB for Heartland's), and only when
+                    // the line is logged.
+                    if (Plugin.DebugEnabled)
+                        Plugin.LogDebug($"{instance.name}: {tree.name}.PositionData <- '{scatter.name}' " +
+                                        $"({TreeCount(scatter):N0} trees, was {TreeCount(tree.PositionData):N0})");
 
-                    Plugin.LogDebug($"{instance.name}: {tree.name}.PositionData <- '{scatter.name}' " +
-                                    $"({scatter.bytes.Length / TreePositionStride:N0} trees, was {donor:N0})");
+                    tree.PositionData = scatter;
                 }
 
                 return;
@@ -709,6 +1134,9 @@ namespace CustomMaps
 
         /// <summary>Bytes per baked tree position: a little-endian <c>Vector3</c>.</summary>
         const int TreePositionStride = 12;
+
+        /// <summary>How many tree positions a scatter holds, 0 for none, from its size alone.</summary>
+        static long TreeCount(TextAsset scatter) => scatter != null ? scatter.dataSize / TreePositionStride : 0;
 
         /// <summary>
         /// This map's baked tree positions, or null if it ships none or ships them wrong.
@@ -744,7 +1172,8 @@ namespace CustomMaps
                     return null;
                 }
 
-                int length = scatter.bytes.Length;
+                // The size, not the bytes: TextAsset.bytes would copy the whole scatter to measure it.
+                long length = scatter.dataSize;
                 if (length == 0 || length % TreePositionStride != 0)
                 {
                     Plugin.LogWarning($"{instance.name}: '{asset}' is {length} bytes, which is not a whole " +
@@ -804,6 +1233,19 @@ namespace CustomMaps
         public const string BridgeRoot = "Bridges";
         public const string TunnelRoot = "Tunnels";
 
+        /// <summary>The map root's child holding the grass blockers, named by the generator's
+        /// <c>GrassBlockerBuilder.RootName</c>: one invisible mesh per terrain tile, with no
+        /// material slot, which <see cref="BlockGrass"/> registers in place of the road ribbons.
+        /// A sibling of <see cref="RoadRoot"/> rather than under it, so a plugin that predates
+        /// them passes them by.</summary>
+        public const string GrassBlockerRoot = "GrassBlockers";
+
+        /// <summary>What a map's id is followed by in the name of its grass mask, the texture
+        /// <see cref="UseGrassMask"/> puts in place of the donor's: <c>swissalps_grass_mask</c>. Named
+        /// by the generator's <c>GrassMaskTexture.Suffix</c>, and found by name because nothing in the
+        /// prefab refers to it and the manifest has no field for it.</summary>
+        public const string GrassMaskSuffix = "_grass_mask";
+
         /// <summary>The map root's children holding the lake surfaces and the hand-placed
         /// models, named by <c>MapForge.BuildLakes</c> and <c>MapProps.RootName</c>. Named here
         /// because neither is ground to the game's decals (<see cref="BorrowMaterials"/>).</summary>
@@ -820,16 +1262,17 @@ namespace CustomMaps
         const uint GroundRenderingLayers = 3u;
 
         /// <summary>Materials named with this prefix are placeholders, to be replaced at
-        /// load time with the equivalent base-game material.</summary>
-        public const string BorrowMarker = "__BORROW__";
+        /// load time with the equivalent base-game material. The markers' names are kept in
+        /// <see cref="MaterialMarkers"/>, which reads them, apart from the game's types.</summary>
+        public const string BorrowMarker = MaterialMarkers.Borrow;
 
         /// <summary>Placeholder standing in for the game's water surface, used by lake
         /// quads that sit above the datum.</summary>
-        public const string WaterMarker = "__BORROW__Water";
+        public const string WaterMarker = MaterialMarkers.Water;
 
         /// <summary>Placeholder standing in for a paved surface, used by the road
         /// ribbons.</summary>
-        public const string PavedMarker = "__BORROW__Paved";
+        public const string PavedMarker = MaterialMarkers.Paved;
 
         /// <summary>
         /// Name of the map root's child holding the airfield paving.
@@ -844,18 +1287,18 @@ namespace CustomMaps
         public const string AirfieldRoot = "Airfields";
 
         /// <summary>Placeholder standing in for a runway surface.</summary>
-        public const string RunwayMarker = "__BORROW__Runway";
+        public const string RunwayMarker = MaterialMarkers.Runway;
 
         /// <summary>Placeholder standing in for taxiway and apron tarmac.</summary>
-        public const string TarmacMarker = "__BORROW__Tarmac";
+        public const string TarmacMarker = MaterialMarkers.Tarmac;
 
         /// <summary>Placeholder for structural trim: bridge parapets, tunnel liners. Resolved to
         /// the shipped <see cref="StructureMaterialName"/>.</summary>
-        public const string StructureMarker = "__BORROW__Structure";
+        public const string StructureMarker = MaterialMarkers.Structure;
 
         /// <summary>Placeholder for bare concrete: bridge decks' edges and undersides, piers,
         /// tunnel portals. Resolved to the shipped <see cref="ConcreteMaterialName"/>.</summary>
-        public const string ConcreteMarker = "__BORROW__Concrete";
+        public const string ConcreteMarker = MaterialMarkers.Concrete;
 
         /// <summary>
         /// The shipped materials the structure markers borrow, by exact name. Measured on the
@@ -874,6 +1317,28 @@ namespace CustomMaps
         /// </summary>
         public const string RunwayMaterialName = "runway1";
         public const string TarmacMaterialName = "asphalt";
+
+        /// <summary>
+        /// The marker the airfields' paint wears in the bundle: every runway end's number, the base
+        /// game's threshold and touchdown marks, and the taxi lanes' yellow lines, as one mesh a field
+        /// under <see cref="MarkingsRoot"/>. Swapped for the game's own <see cref="MarkingsMaterialName"/>
+        /// and switched on, since the renderers ship switched off.
+        ///
+        /// Not a <see cref="BorrowMarker"/> name, on purpose: a plugin from before the paint gives every
+        /// <c>__BORROW__</c> slot it does not know the terrain, and one starting with
+        /// <see cref="RunwayMarker"/> the runway's concrete. With its own marker and switched off, the
+        /// paint is simply not there to such a plugin.
+        /// </summary>
+        public const string MarkingsMarker = MaterialMarkers.Markings;
+
+        /// <summary>The base game's runway and taxiway paint (<c>Shader Graphs/vertexColorAlphaClip</c>,
+        /// texture <c>runway_markings_b</c>), shared by every one of its airfields' painted meshes, so
+        /// only ever assigned, never changed.</summary>
+        public const string MarkingsMaterialName = "runway_markings";
+
+        /// <summary>The child of the map root the airfields' paint is under: a sibling of
+        /// <see cref="AirfieldRoot"/>, so a plugin from before the paint never registers it as paving.</summary>
+        public const string MarkingsRoot = "AirfieldMarkings";
 
         /// <summary>
         /// The game's water material, taken from <c>LevelInfo</c>.
@@ -903,6 +1368,8 @@ namespace CustomMaps
                 {
                     if (candidate == null || candidate.shader == null) continue;
                     if (!candidate.shader.name.Contains("WaterSurface")) continue;
+                    // A map played earlier may still be in the scene, owning copies that go with it.
+                    if (MaterialNames.IsPerRendererCopy(candidate.name)) continue;
 
                     _waterMaterial = candidate;
                     break;
@@ -932,6 +1399,9 @@ namespace CustomMaps
         /// </summary>
         static void DescribeWaterShader(Material water)
         {
+            // A debug block only: not built at all when it would not be written.
+            if (!Plugin.DebugEnabled) return;
+
             Shader shader = water.shader;
             if (shader == null) return;
 
@@ -1032,6 +1502,8 @@ namespace CustomMaps
             {
                 if (candidate?.shader == null) continue;
                 if (!candidate.shader.name.Contains("Runway")) continue;
+                // As for the water: never a copy owned by a map on its way out.
+                if (MaterialNames.IsPerRendererCopy(candidate.name)) continue;
 
                 _pavedMaterial = candidate;
                 Plugin.LogWarning($"no shipped road geometry found; falling back to '{candidate.name}', " +
@@ -1055,7 +1527,9 @@ namespace CustomMaps
         /// concrete are rarely in slot zero. Anything still loaded is the fallback, which finds a
         /// material only a building uses. Cached per name, including a miss.
         /// </summary>
-        static Material ResolveNamedShippedMaterial(string exactName)
+        /// <param name="quiet">Say nothing of a miss, for a caller that says itself what it does
+        /// without the material: the airfields' paint stays off, and uses no road surface.</param>
+        static Material ResolveNamedShippedMaterial(string exactName, bool quiet = false)
         {
             if (_namedMaterials.TryGetValue(exactName, out Material cached)) return cached;
 
@@ -1099,7 +1573,7 @@ namespace CustomMaps
 
             if (found != null)
                 Plugin.LogDebug($"'{exactName}' borrowed (shader '{found.shader.name}') from {where}");
-            else
+            else if (!quiet)
                 Plugin.LogWarning($"no shipped material named '{exactName}'; structures that want it use the road surface");
 
             return found;
@@ -1215,6 +1689,10 @@ namespace CustomMaps
         /// </summary>
         static void DescribeRoadSurface(Material material, Mesh mesh)
         {
+            // A debug block only, which reads a readable donor mesh's whole uv channel: not built at
+            // all when it would not be written.
+            if (!Plugin.DebugEnabled) return;
+
             var report = new System.Text.StringBuilder();
             report.AppendLine($"road surface '{material.name}':");
 
@@ -1434,33 +1912,61 @@ namespace CustomMaps
             uint groundLayers = ResolveGroundRenderingLayers();
             int groundRenderers = 0;
 
+            // The airfields' paint: looked up only when a map ships some, and left switched off, as it
+            // ships, when the game's material cannot be found.
+            Material markings = null;
+            bool markingsResolved = false;
+            int paintSwaps = 0, unpainted = 0;
+
+            // Names are read once each: every read of Object.name allocates a new string, and this walks
+            // every slot of every renderer on the map. A material's surface is kept per material (the
+            // terrain's one placeholder fills thousands of slots), and the subtree a renderer sits in per
+            // transform (AncestorNames).
+            var slots = new Dictionary<Material, MaterialSlot>(ByReference<Material>.Instance);
+            AncestorNames<Transform> sections = Sections(BridgeRoot, TunnelRoot, WaterRoot, PropsRoot);
+
             int terrainSwaps = 0, waterSwaps = 0, pavedSwaps = 0, runwaySwaps = 0, tarmacSwaps = 0, structureSwaps = 0;
             foreach (MeshRenderer renderer in root.GetComponentsInChildren<MeshRenderer>(true))
             {
                 Material[] materials = renderer.sharedMaterials;
                 bool changed = false;
-                bool ground = false, lake = false;
+                bool ground = false, lake = false, paint = false;
 
                 for (int i = 0; i < materials.Length; i++)
                 {
                     Material assigned = materials[i];
-                    if (assigned != null && !assigned.name.StartsWith(BorrowMarker, StringComparison.Ordinal))
+                    MaterialSlot slot = SlotOf(assigned, slots);
+
+                    if (slot == MaterialSlot.Markings)
+                    {
+                        if (!markingsResolved)
+                        {
+                            markingsResolved = true;
+                            markings = ResolveNamedShippedMaterial(MarkingsMaterialName, quiet: true);
+                        }
+
+                        if (markings == null)
+                        {
+                            unpainted++;
+                            continue;
+                        }
+
+                        materials[i] = markings;
+                        paintSwaps++;
+                        changed = paint = true;
                         continue;
+                    }
+
+                    if (slot == MaterialSlot.Own) continue;
 
                     // The marker names which surface is wanted; an unnamed slot defaults
                     // to terrain, since that is all a map has unless it ships lakes.
-                    bool wantsWater = assigned != null &&
-                                      assigned.name.StartsWith(WaterMarker, StringComparison.Ordinal);
-                    bool wantsPaved = assigned != null &&
-                                      assigned.name.StartsWith(PavedMarker, StringComparison.Ordinal);
-                    bool wantsRunway = assigned != null &&
-                                       assigned.name.StartsWith(RunwayMarker, StringComparison.Ordinal);
-                    bool wantsTarmac = assigned != null &&
-                                       assigned.name.StartsWith(TarmacMarker, StringComparison.Ordinal);
-                    bool wantsStructure = assigned != null &&
-                                          assigned.name.StartsWith(StructureMarker, StringComparison.Ordinal);
-                    bool wantsConcrete = assigned != null &&
-                                         assigned.name.StartsWith(ConcreteMarker, StringComparison.Ordinal);
+                    bool wantsWater = slot == MaterialSlot.Water;
+                    bool wantsPaved = slot == MaterialSlot.Paved;
+                    bool wantsRunway = slot == MaterialSlot.Runway;
+                    bool wantsTarmac = slot == MaterialSlot.Tarmac;
+                    bool wantsStructure = slot == MaterialSlot.Structure;
+                    bool wantsConcrete = slot == MaterialSlot.Concrete;
 
                     if ((wantsRunway || wantsTarmac) && !pavingResolved)
                     {
@@ -1489,9 +1995,18 @@ namespace CustomMaps
 
                 if (changed) renderer.sharedMaterials = materials;
 
+                // The paint ships switched off; with the game's material it is shown, and painted over by
+                // craters and scorches as the ground under it is, as the game's own paint is.
+                if (paint)
+                {
+                    renderer.enabled = true;
+                    ground = true;
+                }
+
                 Transform at = renderer.transform;
-                if (Under(at, BridgeRoot)) ground = true;
-                if (lake || Under(at, TunnelRoot) || Under(at, WaterRoot) || Under(at, PropsRoot)) ground = false;
+                if (sections.Under(at, BridgeRoot)) ground = true;
+                if (lake || sections.Under(at, TunnelRoot) || sections.Under(at, WaterRoot) || sections.Under(at, PropsRoot))
+                    ground = false;
 
                 if (ground && (renderer.renderingLayerMask & groundLayers) != groundLayers)
                 {
@@ -1508,7 +2023,24 @@ namespace CustomMaps
                             (pavedSwaps > 0 ? $", {pavedSwaps} for '{paved.name}'" : "") +
                             (runwaySwaps > 0 ? $", {runwaySwaps} runway slot(s) for '{runway.name}'" : "") +
                             (tarmacSwaps > 0 ? $", {tarmacSwaps} tarmac slot(s) for '{tarmac.name}'" : "") +
-                            (structureSwaps > 0 ? $", {structureSwaps} structure slot(s)" : ""));
+                            (structureSwaps > 0 ? $", {structureSwaps} structure slot(s)" : "") +
+                            (paintSwaps > 0 ? $", {paintSwaps} airfield(s) painted with '{markings.name}'" : ""));
+
+            if (unpainted > 0)
+                Plugin.LogWarning($"{root.name}: no shipped material named '{MarkingsMaterialName}', so {unpainted} airfield(s) " +
+                                  "are left unpainted: no runway numbers and no lane lines");
+        }
+
+        /// <summary>The surface a material slot asks for (<see cref="MaterialMarkers.Of"/>), with each
+        /// material's name read once however many slots it fills.</summary>
+        static MaterialSlot SlotOf(Material material, Dictionary<Material, MaterialSlot> known)
+        {
+            if (material == null) return MaterialMarkers.Of(null);
+
+            if (!known.TryGetValue(material, out MaterialSlot slot))
+                known[material] = slot = MaterialMarkers.Of(material.name);
+
+            return slot;
         }
 
         /// <summary>Wave-space offset on the water shader. See <see cref="AnchorLakeWater"/>.</summary>
@@ -1540,10 +2072,18 @@ namespace CustomMaps
         /// <c>LevelInfo.ApplyMapSettings</c> has assigned the per-map ocean textures, so
         /// the copy picks them up; the properties are re-copied on every map load so the
         /// clone cannot drift from the original.
+        ///
+        /// The same walk over the map's renderers finds the sheets <see cref="LayLakeUnderlays"/>
+        /// lays the sea's floor under, which used to walk them all again. Neither has anything to
+        /// do on a shipped map: none of Heartland's 2,698 renderers or Ignus's 4,994 wears the sea's
+        /// material (read off the game's own prefabs, 2026-10-04), so a map that is not one of ours
+        /// is not walked at all. Until then every map was: a map some other loader brings, with lakes
+        /// wearing the sea's material, would now keep them as the game draws them (none is known).
         /// </summary>
         public static void AnchorLakeWater(MapSettings instance)
         {
             if (instance == null) return;
+            if (LoadedMapFor(instance) == null) return;
 
             Material ocean = ResolveWaterMaterial();
             if (ocean == null) return;
@@ -1561,14 +2101,18 @@ namespace CustomMaps
             _lakeWater.SetVector(OriginOffsetProperty, Vector4.zero);
 
             // A lake is any renderer still carrying the shared ocean material: the prefab
-            // pass put it there and nothing else on the map uses it.
+            // pass put it there and nothing else on the map uses it. Each renderer's slots are
+            // read into one list, where sharedMaterials would allocate an array per renderer
+            // only to write back the few that are lakes.
+            var materials = new List<Material>();
+            var sheets = new List<MeshRenderer>();
             int swapped = 0;
             foreach (MeshRenderer renderer in instance.GetComponentsInChildren<MeshRenderer>(true))
             {
-                Material[] materials = renderer.sharedMaterials;
+                renderer.GetSharedMaterials(materials);
                 bool changed = false;
 
-                for (int i = 0; i < materials.Length; i++)
+                for (int i = 0; i < materials.Count; i++)
                 {
                     if (materials[i] != ocean) continue;
 
@@ -1577,12 +2121,139 @@ namespace CustomMaps
                     swapped++;
                 }
 
-                if (changed) renderer.sharedMaterials = materials;
+                if (changed) renderer.sharedMaterials = materials.ToArray();
+
+                // A sheet to lay an underlay under: drawn first with the lakes' water, which is
+                // what Renderer.sharedMaterial reads.
+                if (materials.Count > 0 && materials[0] == _lakeWater) sheets.Add(renderer);
             }
 
             if (swapped > 0)
                 Plugin.LogDebug($"{instance.name}: anchored {swapped} lake surface(s) to map coordinates " +
                                 $"on a private '{_lakeWater.name}'");
+
+            LayLakeUnderlays(instance, sheets);
+        }
+
+        /// <summary>The child each lake sheet draws its underlay on. See <see cref="LayLakeUnderlays"/>.</summary>
+        public const string LakeUnderlayName = "underlay";
+
+        /// <summary>How far under the surface the game's own underlay sits below its sea
+        /// (<c>oceanUnderlay</c>'s local position under <c>oceanPlane</c>).</summary>
+        const float LakeUnderlayDepth = 2f;
+
+        /// <summary>The game's sea underlay material, by name, for when the renderer cannot be
+        /// reached through <c>LevelInfo.waterPlane</c>.</summary>
+        const string OceanUnderlayMaterialName = "OceanUnderlay";
+
+        /// <summary>
+        /// Lays under each lake the opaque floor the game lays under its sea, so a jet's exhaust
+        /// looks the same over both.
+        ///
+        /// A jet's heat haze (<c>JetNozzle.heatHaze</c>, material <c>HeatDistortion</c>: URP's
+        /// particle shader with distortion on and <c>_DistortionBlend</c> at 1) has no colour of
+        /// its own. It draws the camera's opaque texture, the scene as it stood before anything
+        /// transparent was drawn, bent a little. The water is transparent (queue 2502), so it is
+        /// not in that texture and the haze shows the first opaque surface under it. The game's
+        /// sea has one for this: <c>oceanPlane</c> carries a child, <c>oceanUnderlay</c>, the same
+        /// mesh 2 m lower in the opaque blue-grey <c>OceanUnderlay</c>, and over the sea the haze
+        /// is that colour. A lake had nothing between its sheet and the bed it was carved from,
+        /// so over a lake the haze showed the meadow: a green plume behind every jet.
+        ///
+        /// So each sheet gets the same: a child drawing the sheet's own mesh 2 m lower, in the
+        /// game's own material, with the game underlay's renderer settings and layer, and no
+        /// collider. Where a lake is shallower than that the bed hides it, as the sand does at
+        /// sea. Called by <see cref="AnchorLakeWater"/>, whose material is what tells a lake sheet
+        /// apart, with the renderers its walk found wearing it. Without the game's underlay the
+        /// lakes are left as they were. Laid once per sheet, so a reload of the same instance adds
+        /// nothing.
+        /// </summary>
+        static void LayLakeUnderlays(MapSettings instance, List<MeshRenderer> candidates)
+        {
+            if (instance == null || _lakeWater == null || candidates.Count == 0) return;
+
+            MeshRenderer game = null;
+            try
+            {
+                game = GameOceanUnderlay();
+            }
+            catch (Exception e)
+            {
+                // A game update that renamed LevelInfo.waterPlane: fall back to the material by name.
+                Plugin.LogDebug($"could not read LevelInfo.waterPlane ({e.GetType().Name}: {e.Message})");
+            }
+
+            Material underlay = game != null ? game.sharedMaterial : null;
+            if (underlay == null)
+                foreach (Material candidate in Resources.FindObjectsOfTypeAll<Material>())
+                {
+                    if (candidate == null || candidate.name != OceanUnderlayMaterialName) continue;
+
+                    underlay = candidate;
+                    break;
+                }
+
+            int laid = 0, sheets = 0;
+            foreach (MeshRenderer sheet in candidates)
+            {
+                if (!sheet.TryGetComponent(out MeshFilter filter) || filter.sharedMesh == null) continue;
+
+                sheets++;
+                if (underlay == null || sheet.transform.Find(LakeUnderlayName) != null) continue;
+
+                var child = new GameObject(LakeUnderlayName);
+                child.layer = game != null ? game.gameObject.layer : sheet.gameObject.layer;
+                child.transform.SetParent(sheet.transform, worldPositionStays: false);
+
+                // Lowered in world space, not local: the depth is metres of water whatever the
+                // sheet's scale.
+                child.transform.position = sheet.transform.position - Vector3.up * LakeUnderlayDepth;
+
+                child.AddComponent<MeshFilter>().sharedMesh = filter.sharedMesh;
+                var renderer = child.AddComponent<MeshRenderer>();
+                renderer.sharedMaterial = underlay;
+
+                MeshRenderer like = game != null ? game : sheet;
+                renderer.shadowCastingMode = game != null ? game.shadowCastingMode : ShadowCastingMode.Off;
+                renderer.receiveShadows = like.receiveShadows;
+                renderer.lightProbeUsage = like.lightProbeUsage;
+                renderer.reflectionProbeUsage = like.reflectionProbeUsage;
+                renderer.motionVectorGenerationMode = like.motionVectorGenerationMode;
+                renderer.allowOcclusionWhenDynamic = like.allowOcclusionWhenDynamic;
+                renderer.renderingLayerMask = like.renderingLayerMask;
+                laid++;
+            }
+
+            if (sheets == 0) return;
+
+            if (underlay == null)
+                Plugin.LogWarning($"{instance.name}: the game's sea underlay ('{OceanUnderlayMaterialName}') was not " +
+                                  $"found, so the {sheets} lake(s) have none and a jet's exhaust over them shows the " +
+                                  "lake bed's colour");
+            else if (laid > 0)
+                Plugin.LogDebug($"{instance.name}: laid '{underlay.name}' {LakeUnderlayDepth:0} m under {laid} lake " +
+                                $"surface(s), as under the sea" + (game == null ? " (found by name)" : ""));
+        }
+
+        /// <summary>
+        /// The renderer the game draws its sea underlay with: the child of <c>LevelInfo.waterPlane</c>
+        /// (<c>oceanPlane/oceanUnderlay</c>), or null.
+        ///
+        /// A method of its own, never inlined, so that a game update removing the member throws at
+        /// this call, inside <see cref="LayLakeUnderlays"/>'s guard.
+        /// </summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        static MeshRenderer GameOceanUnderlay()
+        {
+            LevelInfo level = NetworkSceneSingleton<LevelInfo>.i;
+            Transform plane = level != null ? level.waterPlane : null;
+            if (plane == null) return null;
+
+            foreach (MeshRenderer renderer in plane.GetComponentsInChildren<MeshRenderer>(true))
+                if (renderer.transform != plane && renderer.sharedMaterial != null)
+                    return renderer;
+
+            return null;
         }
 
         /// <summary>
@@ -1683,7 +2354,7 @@ namespace CustomMaps
         /// </summary>
         static void DescribeMaterial(Material material)
         {
-            if (Plugin.DebugLogging == null || !Plugin.DebugLogging.Value) return;
+            if (!Plugin.DebugEnabled) return;
 
             try
             {

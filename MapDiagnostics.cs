@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using Unity.Collections;
 using UnityEngine.Rendering;
 using NuclearOption.SavedMission;
 using UnityEngine;
@@ -80,11 +81,12 @@ namespace CustomMaps
 
                 int withMaterial = 0, paved = 0;
                 PhysicMaterial terrain = MapFixups.TerrainPhysicMaterial;
+                AncestorNames<Transform> sections = MapFixups.Sections(MapFixups.RoadRoot, MapFixups.AirfieldRoot);
 
                 foreach (MeshCollider c in colliders)
                 {
                     if (terrain != null && c.sharedMaterial == terrain) withMaterial++;
-                    else if (IsRoadRibbon(c)) paved++;
+                    else if (IsRoadRibbon(c, sections)) paved++;
                 }
 
                 // Road ribbons are the one thing that must NOT carry the terrain material:
@@ -151,8 +153,12 @@ namespace CustomMaps
                 "naval AI cannot path whatever water sits at the datum"));
 
             Line(report, "ribbon mesh", DescribeRibbons(settings));
+            Line(report, "grass blockers", DescribeGrassBlockers(settings));
+            Line(report, "grass mask", DescribeGrassMask(map));
             Line(report, "airbases", DescribeAirbases(settings));
             Line(report, "airfields", DescribeAirfieldPaving(settings));
+            Line(report, "buildings", DescribeBuildings(map));
+            Line(report, "airfield paint", DescribeAirfieldPaint(settings));
 
             report.Append("  => ").Append(ok ? "OK" : "REJECTED");
 
@@ -177,19 +183,16 @@ namespace CustomMaps
         }
 
         /// <summary>True for a collider under the map's <c>Roads</c> root, which is where
-        /// the ribbons that give ground vehicles their on-road speed live.</summary>
-        static bool IsRoadRibbon(Component collider)
+        /// the ribbons that give ground vehicles their on-road speed live. Asked through
+        /// <paramref name="sections"/>, made for the two roots, so that each transform's name is
+        /// read once over the thousands of colliders asked about.</summary>
+        static bool IsRoadRibbon(Component collider, AncestorNames<Transform> sections)
         {
-            for (Transform at = collider.transform; at != null; at = at.parent)
-            {
-                // The airfield paving keeps a null PhysicMaterial for exactly the same reason
-                // the ribbons do, so it is the same kind of deliberate rather than a second
-                // kind that needs its own counter.
-                if (at.name == MapFixups.RoadRoot) return true;
-                if (at.name == MapFixups.AirfieldRoot) return true;
-            }
-
-            return false;
+            // The airfield paving keeps a null PhysicMaterial for exactly the same reason
+            // the ribbons do, so it is the same kind of deliberate rather than a second
+            // kind that needs its own counter.
+            return sections.Under(collider.transform, MapFixups.RoadRoot) ||
+                   sections.Under(collider.transform, MapFixups.AirfieldRoot);
         }
 
         static string Describe(Texture2D t) => t != null ? $"{t.width}x{t.height}" : "absent";
@@ -350,10 +353,68 @@ namespace CustomMaps
                     .Append($"({at.x,8:N0}, {at.z,8:N0}) at {at.y,5:N0} m, ")
                     .Append($"{airbase.runways?.Length ?? 0} runway(s), {length,5:N0} m")
                     .Append(ExtraRunwayLengths(airbase, runway))
-                    .Append($", capture {saved?.CaptureRange ?? 0f:N0} m");
+                    .Append($", capture {saved?.CaptureRange ?? 0f:N0} m")
+                    .Append(DescribeTaxiNetwork(airbase));
             }
 
             return line.ToString();
+        }
+
+        /// <summary>
+        /// The airbase's taxi network, its AI roads, as ", AI roads from lanes 23 road(s), 14 exit(s)",
+        /// or ", no AI roads  WARN" for one that has none, whose AI drives straight across the field.
+        /// Read from the private field the plugin set, so it says what the game will be given.
+        /// </summary>
+        static string DescribeTaxiNetwork(Airbase airbase)
+        {
+            var network = typeof(Airbase).GetField(AirbaseBuilder.TaxiNetworkField,
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.GetValue(airbase)
+                as RoadPathfinding.RoadNetwork;
+            if (network == null || network.roads == null || network.roads.Count == 0) return ", no AI roads  WARN";
+
+            int exits = 0;
+            foreach (Airbase.Runway runway in airbase.runways ?? Array.Empty<Airbase.Runway>())
+                exits += runway?.exitPoints?.Length ?? 0;
+
+            string made = "";
+            if (AirbaseBuilder.NetworkSources.TryGetValue(airbase, out AirbaseBuilder.NetworkSource source))
+                made = source.Source == TaxiSource.Lanes ? " from lanes"
+                     : source.Source == TaxiSource.Taxiways ? " from taxiways"
+                     : source.FromMap ? " default" : " default (built at load)";
+
+            return $", AI roads{made} {network.roads.Count} road(s), {exits} exit(s)";
+        }
+
+        /// <summary>
+        /// The airfields' paint: the runway numbers, the base game's runway marks and the taxi lanes'
+        /// lines, one mesh a field. Each needs the game's paint material and switched on (MapFixups
+        /// does both), and its texture coordinates and vertex colours through the bundle, which the
+        /// marking shader reads and a bundle built any other way than MapForge's strips.
+        /// </summary>
+        static string DescribeAirfieldPaint(MapSettings settings)
+        {
+            Transform root = settings.transform.Find(MapFixups.MarkingsRoot);
+            if (root == null) return "none: a bundle built before the paint, or no drawn airfield";
+
+            int fields = 0, shown = 0, painted = 0, channels = 0, triangles = 0;
+            foreach (MeshRenderer renderer in root.GetComponentsInChildren<MeshRenderer>(true))
+            {
+                Mesh mesh = renderer.TryGetComponent(out MeshFilter filter) ? filter.sharedMesh : null;
+                if (mesh == null) continue;
+
+                fields++;
+                triangles += (int)(mesh.GetIndexCount(0) / 3);
+                if (renderer.enabled) shown++;
+                if (renderer.sharedMaterial != null && renderer.sharedMaterial.name == MapFixups.MarkingsMaterialName) painted++;
+                if (mesh.HasVertexAttribute(VertexAttribute.TexCoord0) && mesh.HasVertexAttribute(VertexAttribute.Color)) channels++;
+            }
+
+            if (fields == 0) return $"'{MapFixups.MarkingsRoot}' holds no mesh  WARN";
+
+            bool ok = shown == fields && painted == fields && channels == fields;
+            return $"{fields} field(s), {triangles:N0} triangles, {painted} with '{MapFixups.MarkingsMaterialName}', {shown} shown, " +
+                   $"{channels} with texture coordinates and colours" +
+                   (ok ? "  OK" : "  WARN: a field without all three draws no paint, or the wrong one");
         }
 
         /// <summary>The lengths of the runways after the main one, as " + 1,200 + 900 m", or empty
@@ -394,7 +455,8 @@ namespace CustomMaps
             Transform root = settings.transform.Find(MapFixups.AirfieldRoot);
             if (root == null) return "none — this map ships no airfield paving  WARN";
 
-            int fields = 0, surfaces = 0, vertices = 0;
+            int fields = 0, surfaces = 0, vertices = 0, floors = 0, ground = 0;
+            PhysicMaterial terrain = MapFixups.TerrainPhysicMaterial;
 
             foreach (Transform child in root)
             {
@@ -407,10 +469,23 @@ namespace CustomMaps
                     surfaces++;
                     vertices += filter.sharedMesh.vertexCount;
                 }
+
+                // The floors are ground, not paving (MapFixups.GroundAirfieldFloors): one left
+                // without the terrain's material lets every aircraft roll on the field's grass.
+                foreach (MeshCollider collider in child.GetComponentsInChildren<MeshCollider>(true))
+                {
+                    if (!MapFixups.IsAirfieldFloor(collider)) continue;
+
+                    floors++;
+                    if (terrain != null && collider.sharedMaterial == terrain) ground++;
+                }
             }
 
-            return $"{fields} field(s), {surfaces} surface(s), {vertices:N0} vertices" +
-                   (surfaces == 0 ? "  WARN — nothing paved" : "  OK");
+            string floorNote = floors == 0 ? ""
+                : $", {ground}/{floors} floor(s) as ground" + (ground == floors ? "" : "  WARN — gear will not break on the grass inside");
+
+            return $"{fields} field(s), {surfaces} surface(s), {vertices:N0} vertices" + floorNote +
+                   (surfaces == 0 ? "  WARN — nothing paved" : ground == floors ? "  OK" : "");
         }
 
         /// <summary>
@@ -441,7 +516,11 @@ namespace CustomMaps
             if (roads == null) return $"no '{MapFixups.RoadRoot}' child — this map ships no ribbons";
 
             int meshes = 0, vertices = 0, uv0 = 0, normals = 0, tangents = 0, readable = 0;
-            Mesh sample = null;
+
+            // The largest mesh, preferring one with Read/Write: since NOMapForge 2026-10-05 only a
+            // chunk's finest level, which carries its collider, keeps its CPU copy, and only such a
+            // mesh can show its uv range below.
+            Mesh sample = null, readableSample = null;
 
             foreach (MeshFilter filter in roads.GetComponentsInChildren<MeshFilter>(true))
             {
@@ -457,7 +536,11 @@ namespace CustomMaps
                 if (mesh.isReadable) readable++;
 
                 if (sample == null || mesh.vertexCount > sample.vertexCount) sample = mesh;
+                if (mesh.isReadable && (readableSample == null || mesh.vertexCount > readableSample.vertexCount))
+                    readableSample = mesh;
             }
+
+            if (readableSample != null) sample = readableSample;
 
             if (meshes == 0) return $"'{MapFixups.RoadRoot}' has no MeshFilter";
 
@@ -476,6 +559,94 @@ namespace CustomMaps
 
             if (sample != null) line.Append(NewLine).Append(DescribeMesh(sample));
             return line.ToString();
+        }
+
+        /// <summary>
+        /// The invisible meshes that keep grass off the roads (<c>MapFixups.BlockGrass</c>).
+        ///
+        /// A bundle without them still loads and its roads still block grass, but with no verge,
+        /// so tufts lean over every road's edge and grow through the low ends of every bridge;
+        /// nothing else in the log would say which kind of bundle this is. A blocker with a
+        /// material slot is worth a word too: <c>BorrowMaterials</c> turns an empty slot into the
+        /// terrain material, and only the plugin hiding the renderer at load
+        /// (<c>MapFixups.HideBlocker</c>, which switches it off or, should its bounds not hold, sets
+        /// <c>forceRenderingOff</c>) would then keep a copy of the ground from drawing a metre above
+        /// sea level.
+        /// </summary>
+        static string DescribeGrassBlockers(MapSettings settings)
+        {
+            Transform root = settings.transform.Find(MapFixups.GrassBlockerRoot);
+            if (root == null)
+                return "none — a bundle built before them: the road ribbons block grass, with no verge and no " +
+                       "bridge ends. Rebuild the map.";
+
+            int meshes = 0, triangles = 0, slotted = 0;
+            foreach (MeshRenderer renderer in root.GetComponentsInChildren<MeshRenderer>(true))
+            {
+                Mesh mesh = renderer.TryGetComponent(out MeshFilter filter) ? filter.sharedMesh : null;
+                if (mesh == null) continue;
+
+                meshes++;
+                triangles += (int)(mesh.GetIndexCount(0) / 3);
+                if (renderer.sharedMaterials.Length > 0) slotted++;
+            }
+
+            if (meshes == 0) return $"'{MapFixups.GrassBlockerRoot}' holds no mesh  WARN — the road ribbons block grass instead";
+
+            return $"{meshes} tile(s), {triangles:N0} triangles" +
+                   (slotted > 0 ? $"  WARN — {slotted} carry a material slot; kept from drawing only by being hidden at load"
+                                : "  OK");
+        }
+
+        /// <summary>
+        /// Whether the bundle ships the map's own grass mask (<c>MapFixups.UseGrassMask</c>), or has
+        /// none and the grass grows where the donor's mask says.
+        ///
+        /// Nothing else would tell the two apart: either way there is grass, only in other places.
+        /// Asked of the bundle's names without loading the mask (<c>MapFixups.ShipsGrassMask</c>):
+        /// this block was written for every installed map at the first load of any, where loading the
+        /// mask would have held 16 MB of video memory per map whether or not it was played. It is now
+        /// written as a map is prepared for play, which needs the mask no sooner. Its size and format,
+        /// and a warning if it is sRGB, are logged when the map is played and the mask put in place.
+        /// </summary>
+        static string DescribeGrassMask(LoadedMap map)
+        {
+            if (!MapFixups.ShipsGrassMask(map))
+                return "none — a bundle built before it: grass grows where the donor's own mask says, stretched " +
+                       "over this map. Rebuild the map.";
+
+            return $"'{map.Manifest.MapId}{MapFixups.GrassMaskSuffix}' in the bundle, loaded when the map is played  OK";
+        }
+
+        /// <summary>
+        /// The map's buildings as its bundle carries them (<see cref="BuildingsReport"/>).
+        ///
+        /// Loaded from the bundle directly, not through <c>LoadedMap.Asset</c>, which warns on a
+        /// miss: this line says so once, beside the rest of the map's readiness. Loaded, where the
+        /// grass mask is only looked for by name, because the count is what shows a rebuilt map has
+        /// its towns back, and the cost is small: 1.3 MB on Swiss Alps, held until unused assets
+        /// are next unloaded. The scene load does that when a map is played, so <c>CityBuilder</c>
+        /// usually reads the placements from the bundle a second time.
+        ///
+        /// Unity still loads the asset whole, in its own memory; only the 12-byte header is copied
+        /// out of it, through <c>GetData</c>, a view of that memory, and the count checked against
+        /// the asset's length. <c>TextAsset.bytes</c> copied all 1.3 MB into a managed array as
+        /// well, and <c>CityData.Read</c> then parsed 64,524 placements, to print their number.
+        /// </summary>
+        static string DescribeBuildings(LoadedMap map)
+        {
+            string asset = map.Manifest?.CityPlacements;
+            TextAsset data = string.IsNullOrEmpty(asset) || map.Bundle == null
+                ? null
+                : map.Bundle.LoadAsset<TextAsset>(asset);
+
+            if (data == null) return BuildingsReport.Describe(asset, null, 0);
+
+            NativeArray<byte> raw = data.GetData<byte>();
+            var head = new byte[Math.Min(raw.Length, BuildingsReport.HeaderLength)];
+            NativeArray<byte>.Copy(raw, head, head.Length);
+
+            return BuildingsReport.Describe(asset, head, raw.Length);
         }
 
         /// <summary>
@@ -504,9 +675,9 @@ namespace CustomMaps
             if (!mesh.isReadable)
             {
                 sb.Append(NewLine).Append(Indent)
-                  .Append("not readable — uv range unavailable. m_IsReadable is serialised on the "
-                          + "mesh and the bundle build writes it through, so this would mean the "
-                          + "authoring side called UploadMeshData.");
+                  .Append("not readable — uv range unavailable. Expected for a mesh only drawn: "
+                          + "NOMapForge saves those without Read/Write, so that no CPU copy stays in "
+                          + "memory. The layout above is still what the GPU has.");
                 return sb.ToString();
             }
 

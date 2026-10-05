@@ -81,7 +81,8 @@ namespace CustomMaps.Patches
 
             // After ApplyMapSettings, not before: it is what assigns the per-map ocean
             // textures to the shared water material, and the lakes' private copy is taken
-            // from that material.
+            // from that material. The same walk lays the sea's opaque underlay under each
+            // lake, so a jet's heat haze over one is not the green bed.
             MapFixups.AnchorLakeWater(mapSettings);
 
             // ApplyMapSettings is where the road network is cloned into LevelInfo and
