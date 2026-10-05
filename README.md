@@ -37,11 +37,6 @@ match and is told so at join time, instead of silently disagreeing about where t
 Maps installed by the NOMM mod manager (in `addons/`) are found too. Keep only one build of each map
 installed: Unity refuses a second one, and the log says so.
 
-## Making maps
-
-The Unity tools and a guide to making maps are in a separate repository,
-[NOCustomMapsCreator](https://github.com/BatongMaster/NOCustomMapsCreator).
-
 ## Multiplayer
 
 The server and every player need the same `.nomap` file and should run the same release of this
