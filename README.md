@@ -15,14 +15,15 @@ missions and multiplayer like the built-in maps.
 
 ###  How to install manually (if you don't use NOMM)
 
-1. Download `swissalps-<version>.zip` from this repository's releases.
+1. Download `NOCustomMaps-<version>.zip` from this repository's releases.
 2. Create a folder named `NOCustomMaps` in `BepInEx/plugins/`
-3. Copy the map (.nomap or .nomapz) into `BepInEx/plugins/NOCustomMaps/maps/` under your Nuclear Option
+3. Place the DLL in the `NOCustomMaps` folder
+4. Copy the map (.nomap or .nomapz) into `BepInEx/plugins/NOCustomMaps/maps/` under your Nuclear Option
    installation. (`CustomMaps/` under the game's persistent data path works too; the plugin looks in both.)
 
    Maps released as `.nomapz` (Swiss Alps from 0.4.0 on) need NOCustomMaps 1.4 or later. Older versions
    do not see them, and the game then only says the map is not installed.
-4. Start the game once and look in `BepInEx/LogOutput.log` for the line the plugin prints when it
+5. Start the game once and look in `BepInEx/LogOutput.log` for the line the plugin prints when it
    registers the map:
 
    ```
@@ -31,7 +32,7 @@ missions and multiplayer like the built-in maps.
 
    The `cm.swissalps.<hash8>` name is how missions refer to the map. The eight hex digits are the
    start of the bundle's SHA-256, so they identify this exact build.
-5. Open the Mission Editor and pick the map's tile under **New**, after Heartland and Ignus Archipelago,
+6. Open the Mission Editor and pick the map's tile under **New**, after Heartland and Ignus Archipelago,
    then **Create New** or **Create Default** (see [Mission editor](#mission-editor)).
 
 **Multiplayer:** the server and every client need the same build of the map. A `.nomap` and the
