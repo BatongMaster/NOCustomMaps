@@ -41,6 +41,10 @@ namespace CustomMaps
             return _prepared.TryGetValue(map.PrefabName, out MapSettings prefab) ? prefab : null;
         }
 
+        /// <summary>True when the map's prefab failed preparation this session, so that loading it fails
+        /// again: the mission editor's tile for it is then greyed out rather than offered as if it worked.</summary>
+        internal static bool IsRejected(LoadedMap map) => map?.PrefabName != null && _rejected.Contains(map.PrefabName);
+
         /// <summary>
         /// Prepares the custom map <paramref name="mapName"/>, which <c>EnableMap</c> is about to
         /// enable, once per session. A shipped map's name, or one of ours already prepared or
@@ -121,7 +125,13 @@ namespace CustomMaps
 
             PrepareNetworkMap(settings, m, networked);
             int rebound = RebindTerrain(root, m.TerrainRoot);
-            BindLakeVolumes(root);
+
+            // The raised lakes' footprints and heights, read from their sheets, for the game's water
+            // tests. Those tests are patched at start-up when a map's manifest lists lakes; this
+            // catches a map whose sheets are there all the same.
+            if (LakeWater.Read(map, root, WaterRoot) > 0)
+                Patches.LakeWaterPatches.Apply(new HarmonyLib.Harmony(Plugin.Guid));
+
             BorrowMaterials(root, map);
             BorrowFactionMusic(settings);
             RoadNetworkFixup.Attach(settings, map);
@@ -338,103 +348,6 @@ namespace CustomMaps
         /// </summary>
         internal static AncestorNames<Transform> Sections(params string[] names)
             => new AncestorNames<Transform>(at => at.parent, at => at.name, names);
-
-        /// <summary>
-        /// Fills the raised lakes with water: gives every <c>BoxCollider</c> under the map's
-        /// <see cref="WaterRoot"/> the game's water PhysicMaterial and turns it on.
-        ///
-        /// The game's sea is a plane at global y = 0 and nearly all of its water behaviour tests
-        /// that height, so a lake above it was a sheet an aircraft could fly under. One hook
-        /// tests geometry instead, and nothing the game ships uses it:
-        /// <c>AeroPart.OnTriggerStay</c> takes a part's depth in any trigger whose
-        /// <c>sharedMaterial</c> is <c>GameAssets.i.WaterMaterial</c>
-        /// (<c>Physics.ComputePenetration</c>), and <c>AeroJob_Math</c> runs the sea's water model
-        /// on it: drag, water density, wings that stop lifting, buoyancy, the splash, and above
-        /// 83 m/s the airframe breaking up. <c>BulletSim</c> plays the water impact on the same
-        /// material, and <c>AeroPart</c>'s splash line-cast finds it. NOMapForge fills each lake's
-        /// water with static trigger boxes (<c>Lake_&lt;name&gt;/volume_&lt;k&gt;</c>, layer
-        /// Statics, from the surface to below the bed), and ships them switched off with no
-        /// material, because the material has to be the game's own instance, compared by
-        /// reference, and a bundle cannot carry that.
-        ///
-        /// The material is found first, and without it nothing is turned on. An enabled trigger
-        /// with no water material is not water to anything: it is a floor to every raycast that
-        /// hits triggers and armour to every bullet, over a lake that looks like water. So when
-        /// <c>GameAssets</c> is not loaded, or has no water material, the volumes stay off and
-        /// the lakes are what they were before: a sheet with nothing under it. This runs from the
-        /// <c>EnableMap</c> prefix, long after <c>MainMenu</c> has preloaded <c>GameAssets</c>;
-        /// the loader is asked first anyway, because <c>GameAssets.i</c> read too early logs an
-        /// error of its own.
-        ///
-        /// A bundle built before the volumes has none, and this does nothing to it. Landing gear
-        /// is kept from rolling on the water by <see cref="Patches.LandingGearTriggerPatch"/>.
-        ///
-        /// Returns how many volumes were turned on.
-        /// </summary>
-        static int BindLakeVolumes(GameObject root)
-        {
-            Transform water = root.transform.Find(WaterRoot);
-            if (water == null) return 0;
-
-            BoxCollider[] volumes = water.GetComponentsInChildren<BoxCollider>(true);
-            if (volumes.Length == 0) return 0;
-
-            PhysicMaterial material = null;
-            try
-            {
-                material = GameWaterMaterial();
-            }
-            catch (Exception e)
-            {
-                // A game update that renamed the member: the lakes stay as they were rather than
-                // the map failing to load.
-                Plugin.LogWarning($"could not read GameAssets.WaterMaterial ({e.GetType().Name}: {e.Message})");
-            }
-
-            if (material == null)
-            {
-                foreach (BoxCollider volume in volumes) volume.enabled = false;
-
-                Plugin.LogWarning($"{root.name}: the game's water PhysicMaterial (GameAssets.WaterMaterial) is not " +
-                                  $"available, so the {volumes.Length} lake water volume(s) stay off and aircraft " +
-                                  "can fly under the lakes");
-                return 0;
-            }
-
-            foreach (BoxCollider volume in volumes)
-            {
-                volume.sharedMaterial = material;
-                volume.isTrigger = true;
-                volume.gameObject.layer = PhysicsLayers.Statics;
-                volume.enabled = true;
-            }
-
-            Plugin.LogDebug($"{root.name}: {volumes.Length} lake water volume(s) under {water.childCount} lake(s) " +
-                            $"carry '{material.name}' and are on");
-            return volumes.Length;
-        }
-
-        /// <summary>
-        /// <c>GameAssets.i.WaterMaterial</c>, or null while <c>GameAssets</c> is not loaded.
-        ///
-        /// A method of its own, never inlined, so that if a game update removes either member the
-        /// failure to compile it is thrown at its call, inside <see cref="BindLakeVolumes"/>'s
-        /// guard, rather than when the method preparing the whole map is compiled.
-        /// </summary>
-        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-        static PhysicMaterial GameWaterMaterial()
-            => GameAssets.loader != null && GameAssets.loader.IsLoaded ? GameAssets.i.WaterMaterial : null;
-
-        /// <summary>The water PhysicMaterial the lake volumes were given, or null: for the
-        /// validation report.</summary>
-        public static PhysicMaterial LakeWaterMaterial
-        {
-            get
-            {
-                try { return GameWaterMaterial(); }
-                catch (Exception) { return null; }
-            }
-        }
 
         /// <summary>
         /// Clones the donor's detail-rendering objects into a <em>live</em> map instance.
@@ -1341,6 +1254,29 @@ namespace CustomMaps
         public const string MarkingsRoot = "AirfieldMarkings";
 
         /// <summary>
+        /// The marker the runways' tire marks wear in the bundle: one mesh a field under
+        /// <see cref="TireMarksRoot"/>, the rubber at each runway end's touchdown zone. Swapped for the
+        /// game's own <see cref="TireMarksMaterialName"/> and switched on, since the renderers ship
+        /// switched off.
+        ///
+        /// A marker of its own rather than the paint's, because the game's tire marks are another
+        /// material (transparent and writing no depth, where the paint is opaque and cut out), and neither
+        /// a <see cref="BorrowMarker"/> name nor one starting with <see cref="MarkingsMarker"/>: a plugin
+        /// from before tire marks reads it as the map's own material on a renderer shipped off, and leaves
+        /// them unseen.
+        /// </summary>
+        public const string TireMarksMarker = MaterialMarkers.TireMarks;
+
+        /// <summary>The base game's tire marks (<c>Universal Render Pipeline/Lit</c>, transparent, texture
+        /// <c>runway_skidmarks_b</c>), the one such material it has, worn by every one of its airfields with
+        /// paint; shared, so only ever assigned, never changed.</summary>
+        public const string TireMarksMaterialName = "runway_skidmarks";
+
+        /// <summary>The child of the map root the tire marks are under: a sibling of <see cref="MarkingsRoot"/>,
+        /// so a plugin from before them does not count them among the paint.</summary>
+        public const string TireMarksRoot = "AirfieldTireMarks";
+
+        /// <summary>
         /// The game's water material, taken from <c>LevelInfo</c>.
         ///
         /// Lakes above the datum are rendered as their own quads, and they have to use
@@ -1918,6 +1854,11 @@ namespace CustomMaps
             bool markingsResolved = false;
             int paintSwaps = 0, unpainted = 0;
 
+            // The runways' tire marks the same way, with the game's own tire-mark material.
+            Material tireMarks = null;
+            bool tireMarksResolved = false;
+            int tireSwaps = 0, unmarked = 0;
+
             // Names are read once each: every read of Object.name allocates a new string, and this walks
             // every slot of every renderer on the map. A material's surface is kept per material (the
             // terrain's one placeholder fills thousands of slots), and the subtree a renderer sits in per
@@ -1953,6 +1894,26 @@ namespace CustomMaps
 
                         materials[i] = markings;
                         paintSwaps++;
+                        changed = paint = true;
+                        continue;
+                    }
+
+                    if (slot == MaterialSlot.TireMarks)
+                    {
+                        if (!tireMarksResolved)
+                        {
+                            tireMarksResolved = true;
+                            tireMarks = ResolveNamedShippedMaterial(TireMarksMaterialName, quiet: true);
+                        }
+
+                        if (tireMarks == null)
+                        {
+                            unmarked++;
+                            continue;
+                        }
+
+                        materials[i] = tireMarks;
+                        tireSwaps++;
                         changed = paint = true;
                         continue;
                     }
@@ -1995,8 +1956,9 @@ namespace CustomMaps
 
                 if (changed) renderer.sharedMaterials = materials;
 
-                // The paint ships switched off; with the game's material it is shown, and painted over by
-                // craters and scorches as the ground under it is, as the game's own paint is.
+                // The paint and the tire marks ship switched off; with the game's materials they are shown,
+                // and given the ground's rendering layers as the game's own paint and tire marks have them
+                // (one renderer's submeshes there).
                 if (paint)
                 {
                     renderer.enabled = true;
@@ -2024,11 +1986,16 @@ namespace CustomMaps
                             (runwaySwaps > 0 ? $", {runwaySwaps} runway slot(s) for '{runway.name}'" : "") +
                             (tarmacSwaps > 0 ? $", {tarmacSwaps} tarmac slot(s) for '{tarmac.name}'" : "") +
                             (structureSwaps > 0 ? $", {structureSwaps} structure slot(s)" : "") +
-                            (paintSwaps > 0 ? $", {paintSwaps} airfield(s) painted with '{markings.name}'" : ""));
+                            (paintSwaps > 0 ? $", {paintSwaps} airfield(s) painted with '{markings.name}'" : "") +
+                            (tireSwaps > 0 ? $", {tireSwaps} airfield(s) given tire marks with '{tireMarks.name}'" : ""));
 
             if (unpainted > 0)
                 Plugin.LogWarning($"{root.name}: no shipped material named '{MarkingsMaterialName}', so {unpainted} airfield(s) " +
                                   "are left unpainted: no runway numbers and no lane lines");
+
+            if (unmarked > 0)
+                Plugin.LogWarning($"{root.name}: no shipped material named '{TireMarksMaterialName}', so {unmarked} airfield(s) " +
+                                  "have no tire marks on their runways");
         }
 
         /// <summary>The surface a material slot asks for (<see cref="MaterialMarkers.Of"/>), with each

@@ -124,6 +124,91 @@ namespace CustomMaps.Tests
         }
 
         [Fact]
+        public void FindsCompressedBundlesToo()
+        {
+            var fs = Fs((Plugins, new[]
+            {
+                Path.Combine(Plugins, "alpha-1.0.0.nomap"),
+                Path.Combine(Plugins, "bravo-2.0.0.nomapz"),
+                Path.Combine(Plugins, "bravo-2.0.0.nomapz.json"),       // a sidecar of it
+                Path.Combine(Plugins, "bravo-2.0.0.nomapz.partial"),    // Map Forge's file still being written
+            }));
+
+            var found = BundleDiscovery.Scan(new[] { Plugins }, fs);
+
+            Assert.Equal(2, found.Count);
+            Assert.EndsWith("alpha-1.0.0.nomap", found[0].Path);
+            Assert.False(found[0].Packed);
+            Assert.EndsWith("bravo-2.0.0.nomapz", found[1].Path);
+            Assert.True(found[1].Packed);
+            Assert.Equal("bravo", found[1].FileNameHint);
+        }
+
+        [Fact]
+        public void TellsTheTwoExtensionsApart()
+        {
+            Assert.True(BundleDiscovery.IsBundlePath(@"C:\x\a.nomapz"));
+            Assert.True(BundleDiscovery.IsBundlePath(@"C:\x\a.NOMAPZ"));
+            Assert.False(BundleDiscovery.IsBundlePath(@"C:\x\a.nomapz.json"));
+            Assert.True(BundleDiscovery.IsPackedPath(@"C:\x\a.nomapz"));
+            Assert.False(BundleDiscovery.IsPackedPath(@"C:\x\a.nomap"));
+            Assert.False(BundleDiscovery.IsPackedPath(null));
+        }
+
+        // Unity opens one bundle of a map, and the .nomap would be opened first.
+        [Fact]
+        public void PrefersTheNomapzWhenBothFormsOfABuildAreInstalled()
+        {
+            var fs = Fs((Plugins, new[]
+            {
+                Path.Combine(Plugins, "swissalps-0.4.0.nomap"),
+                Path.Combine(Plugins, "swissalps-0.4.0.nomapz"),
+                Path.Combine(Plugins, "kastellan-1.0.0.nomap"),
+            }));
+
+            var found = BundleDiscovery.Scan(new[] { Plugins }, fs);
+
+            Assert.Equal(2, found.Count);
+            DiscoveredBundle packed = found.Single(b => b.Packed);
+            Assert.EndsWith("swissalps-0.4.0.nomapz", packed.Path);
+            Assert.Single(packed.PreferredOver);
+            Assert.EndsWith("swissalps-0.4.0.nomap", packed.PreferredOver[0]);
+            Assert.Contains(found, b => b.Path.EndsWith("kastellan-1.0.0.nomap"));
+        }
+
+        [Fact]
+        public void PrefersTheNomapzAcrossDirectoriesAndCase()
+        {
+            var fs = Fs(
+                (Plugins, new[] { Path.Combine(Plugins, "SwissAlps-0.4.0.NOMAP") }),
+                (LocalLow, new[] { Path.Combine(LocalLow, "swissalps-0.4.0.nomapz") }));
+
+            var found = BundleDiscovery.Scan(new[] { Plugins, LocalLow }, fs);
+
+            Assert.Single(found);
+            Assert.True(found[0].Packed);
+            Assert.Equal(1, found[0].SourceRank);
+            Assert.Single(found[0].PreferredOver);
+        }
+
+        // Another build of the map is not the same file: both are offered, and Unity's refusal of the
+        // second is explained where it happens.
+        [Fact]
+        public void KeepsANomapOfAnotherVersion()
+        {
+            var fs = Fs((Plugins, new[]
+            {
+                Path.Combine(Plugins, "swissalps-0.3.0.nomap"),
+                Path.Combine(Plugins, "swissalps-0.4.0.nomapz"),
+            }));
+
+            var found = BundleDiscovery.Scan(new[] { Plugins }, fs);
+
+            Assert.Equal(2, found.Count);
+            Assert.All(found, b => Assert.Empty(b.PreferredOver));
+        }
+
+        [Fact]
         public void SidecarPathSitsBesideTheBundle()
         {
             Assert.Equal(@"C:\x\a.nomap.json", BundleDiscovery.SidecarPathFor(@"C:\x\a.nomap"));

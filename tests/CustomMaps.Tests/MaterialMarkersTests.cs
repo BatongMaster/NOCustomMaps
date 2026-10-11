@@ -14,6 +14,7 @@ namespace CustomMaps.Tests
         [InlineData("__BORROW__Structure", MaterialSlot.Structure)]
         [InlineData("__BORROW__Concrete", MaterialSlot.Concrete)]
         [InlineData("__MARKINGS__Runway", MaterialSlot.Markings)]
+        [InlineData("__TIREMARKS__Runway", MaterialSlot.TireMarks)]
         public void EachMarkerAsksForItsSurface(string name, object expected)
         {
             // object, since a public test cannot take the plugin's internal enum.
@@ -26,6 +27,7 @@ namespace CustomMaps.Tests
         [InlineData("__BORROW__Paved (Instance)", MaterialSlot.Paved)]
         [InlineData("__BORROW__Water_lake", MaterialSlot.Water)]
         [InlineData("__MARKINGS__Runway_field3", MaterialSlot.Markings)]
+        [InlineData("__TIREMARKS__Runway (Instance)", MaterialSlot.TireMarks)]
         public void AMarkerIsAPrefix(string name, object expected)
         {
             Assert.Equal((MaterialSlot)expected, MaterialMarkers.Of(name));
@@ -61,6 +63,16 @@ namespace CustomMaps.Tests
             Assert.False(MaterialMarkers.Markings.StartsWith(MaterialMarkers.Borrow, System.StringComparison.Ordinal));
         }
 
+        // Nor is the tire marks', nor does it start with the paint's, so a plugin from before them reads it
+        // as the map's own material and leaves its renderer off, as it ships.
+        [Fact]
+        public void TheTireMarksAreNeitherBorrowedNorPaint()
+        {
+            Assert.False(MaterialMarkers.TireMarks.StartsWith(MaterialMarkers.Borrow, System.StringComparison.Ordinal));
+            Assert.False(MaterialMarkers.TireMarks.StartsWith(MaterialMarkers.Markings, System.StringComparison.Ordinal));
+            Assert.False(MaterialMarkers.TireMarks.StartsWith("__MARKINGS__", System.StringComparison.Ordinal));
+        }
+
         // No marker is a prefix of another, so the order they are tested in cannot matter.
         [Fact]
         public void NoMarkerIsAPrefixOfAnother()
@@ -68,7 +80,7 @@ namespace CustomMaps.Tests
             string[] surfaces =
             {
                 MaterialMarkers.Water, MaterialMarkers.Paved, MaterialMarkers.Runway, MaterialMarkers.Tarmac,
-                MaterialMarkers.Structure, MaterialMarkers.Concrete, MaterialMarkers.Markings,
+                MaterialMarkers.Structure, MaterialMarkers.Concrete, MaterialMarkers.Markings, MaterialMarkers.TireMarks,
             };
 
             foreach (string a in surfaces)

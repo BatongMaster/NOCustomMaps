@@ -10,7 +10,7 @@ using UnityEngine.Rendering;
 
 namespace CustomMaps
 {
-    /// <summary>One loaded <c>.nomap</c> bundle and the map it carries.</summary>
+    /// <summary>One loaded <c>.nomap</c> or <c>.nomapz</c> bundle and the map it carries.</summary>
     internal sealed class LoadedMap
     {
         public string File;
@@ -18,6 +18,27 @@ namespace CustomMaps
         public AssetBundle Bundle;
         public MapManifest Manifest;
         public MapDetails Details;
+
+        /// <summary>For a <c>.nomapz</c>: its header, and the stream the bundle reads through, open for
+        /// as long as the bundle is loaded. Null for a <c>.nomap</c>.</summary>
+        public NomapzHeader Packed;
+        public NomapzStream Stream;
+
+        /// <summary>The file's format, for the log.</summary>
+        public string Format => Packed != null
+            ? $"nomapz format {Packed.Version}, {NomapzHeader.CodecName(Packed.Codec)}"
+            : "nomap, Unity's LZ4 bundle";
+
+        /// <summary>Unloads the bundle and only then closes the stream it reads through. For a bundle
+        /// that is not going to be offered; registered ones stay loaded for the session.</summary>
+        internal void Close()
+        {
+            try { Bundle?.Unload(true); }
+            catch (Exception e) { Plugin.LogWarning($"{Name()}: unloading the bundle threw: {e.Message}"); }
+            Bundle = null;
+            Stream?.Dispose();
+            Stream = null;
+        }
 
         GameObject _root;
         AssetBundleRequest _warm;
@@ -67,6 +88,11 @@ namespace CustomMaps
         /// wait for the rest of it on the main thread.</summary>
         internal bool WarmingUp => _root == null && !_resolveFailed && _warm != null && !_warm.isDone;
 
+        /// <summary>True once the map's prefab has been asked for, by a warm-up or to play the map: from then
+        /// on the textures it holds, its colour map and chart among them, are the map's, and nothing else
+        /// unloads them (<see cref="MapThumbnails"/>).</summary>
+        internal bool PrefabRequested => _warm != null || _root != null || _resolveFailed;
+
         /// <summary>The map's root prefab GameObject, blocking on the warm-up if needed.
         /// Null (once, with a logged reason) if the bundle does not contain it.</summary>
         public GameObject Root()
@@ -99,7 +125,26 @@ namespace CustomMaps
                 Plugin.LogDebug($"{Name()}: prefab ready after {Seconds(start, Stopwatch.GetTimestamp()) * 1000:0} ms " +
                                 $"on the main thread ({how})");
             }
+
+            if (Stream != null) AfterPackedLoad();
             return _root;
+        }
+
+        /// <summary>
+        /// Once a <c>.nomapz</c>'s prefab is read: says whether every chunk decoded, and lets the decode
+        /// cache go. Unity reads nothing more of the bundle for the map itself after this (measured: a
+        /// second instantiation and a 600-frame fly-over read 0 bytes), so the cache's 64 MB would sit
+        /// idle all session; a later read, such as the grass mask, decodes its few chunks again.
+        /// </summary>
+        void AfterPackedLoad()
+        {
+            string failure = Stream.Failure;
+            if (failure != null)
+                Plugin.LogError($"{Name()}: {Path.GetFileName(File)} has a chunk that does not decode ({failure}). " +
+                                "The file is damaged: download it again.");
+
+            Plugin.LogDebug($"{Name()}: {Stream.Stats()}; cache let go");
+            Stream.Trim();
         }
 
         public T Asset<T>(string name) where T : UnityEngine.Object
@@ -109,6 +154,18 @@ namespace CustomMaps
             if (asset == null)
                 Plugin.LogWarning($"{Name()}: no {typeof(T).Name} named '{name}' in the bundle");
             return asset;
+        }
+
+        /// <summary>
+        /// Starts reading an asset on Unity's loading thread and says nothing if the bundle has none of that
+        /// name, unlike <see cref="Asset{T}"/>: for a picture tried among others, where a missing one is
+        /// expected (<see cref="MapThumbnails"/>). Null when there is no name or no bundle; otherwise the
+        /// request, whose <c>asset</c> is null once done if the bundle has no such asset.
+        /// </summary>
+        internal AssetBundleRequest LoadQuietAsync<T>(string name) where T : UnityEngine.Object
+        {
+            if (string.IsNullOrEmpty(name) || Bundle == null) return null;
+            return Bundle.LoadAssetAsync<T>(name);
         }
 
         public string Name() => PrefabName ?? Path.GetFileName(File);
@@ -152,6 +209,8 @@ namespace CustomMaps
         static List<HashJob> _jobs;
         static Thread _hashing;
         static volatile bool _hashed;
+        static volatile bool _checked;
+        static readonly ManualResetEventSlim _namesIn = new ManualResetEventSlim(true);
         static volatile string _cacheProblem;
         static bool _settled = true;
 
@@ -163,6 +222,12 @@ namespace CustomMaps
             public bool Remembered;
             public double Seconds;
             public string Error;
+
+            // A .nomapz: its name comes from Identity, the header's, and the hashing thread checks the
+            // file after the names are in (see HashAll).
+            public bool Packed;
+            public string Identity;
+            public string Problem;
         }
 
         /// <summary>
@@ -181,6 +246,14 @@ namespace CustomMaps
             }
         }
 
+        /// <summary>
+        /// True when reading <see cref="Maps"/> would not wait: the maps are registered, or their hashes are
+        /// in and registering them is a matter of moments. False only in the first seconds after a start
+        /// that is hashing a newly installed or updated map. For the mission editor's map tiles, which wait
+        /// a frame at a time rather than hold the main thread (<c>MapTileList</c>).
+        /// </summary>
+        internal static bool Ready => _settled || _hashed;
+
         public static void ScanAndLoad()
         {
             if (_scanned) return;
@@ -192,9 +265,16 @@ namespace CustomMaps
 
             if (found.Count == 0)
             {
-                Plugin.LogInfo("no .nomap bundles found. Searched: " + string.Join(" | ", directories));
+                Plugin.LogInfo("no .nomap or .nomapz bundles found. Searched: " + string.Join(" | ", directories));
                 return;
             }
+
+            // Both forms of one build installed: Unity would open one and refuse the other, so discovery
+            // kept the .nomapz alone (BundleDiscovery.Scan).
+            foreach (DiscoveredBundle candidate in found)
+                foreach (string other in candidate.PreferredOver)
+                    Plugin.LogInfo($"{Path.GetFileName(candidate.Path)} and {other} are the same build of a map in its two " +
+                                   "forms: loading the .nomapz, leaving the .nomap. Remove one of them.");
 
             // A dedicated server (the game's own test: no graphics device) still reads every map's
             // prefab from the start, as all of them once did: it is there to host, it has no menu to
@@ -232,6 +312,11 @@ namespace CustomMaps
         {
             while (!_settled && !_hashed) yield return null;
             Settle();
+
+            // Then what the hashing thread found of the .nomapz files, which it checks after the names
+            // are in (HashAll).
+            while (!_checked) yield return null;
+            ReportChecks();
         }
 
         /// <summary>
@@ -302,17 +387,15 @@ namespace CustomMaps
                 return null;
             }
 
-            AssetBundle bundle = AssetBundle.LoadFromFile(candidate.Path);
-            if (bundle == null)
+            LoadedMap map = candidate.Packed ? OpenPacked(candidate.Path) : OpenFile(candidate.Path);
+            if (map == null) return null;
+
+            map.Manifest = ReadManifest(map.Bundle, candidate.Path);
+            if (map.Manifest == null)
             {
-                Plugin.LogError($"{candidate.Path}: AssetBundle.LoadFromFile returned null. " + WhyNotLoaded(candidate.Path));
+                if (map.Stream != null) map.Close();
                 return null;
             }
-
-            var map = new LoadedMap { File = candidate.Path, Bundle = bundle };
-
-            map.Manifest = ReadManifest(bundle, candidate.Path);
-            if (map.Manifest == null) return null;
 
             List<MapProblem> problems = map.Manifest.Validate();
             bool fatal = false;
@@ -324,10 +407,85 @@ namespace CustomMaps
             if (fatal && Plugin.ValidateOnLoad.Value)
             {
                 Plugin.LogError($"{candidate.Path}: manifest has errors, not registering this map.");
+                if (map.Stream != null) map.Close();
                 return null;
             }
 
             return map;
+        }
+
+        /// <summary>A <c>.nomap</c>: Unity's own LZ4 bundle, opened from the file.</summary>
+        static LoadedMap OpenFile(string path)
+        {
+            AssetBundle bundle = AssetBundle.LoadFromFile(path);
+            if (bundle == null)
+            {
+                Plugin.LogError($"{path}: AssetBundle.LoadFromFile returned null. " + WhyNotLoaded(path));
+                return null;
+            }
+            return new LoadedMap { File = path, Bundle = bundle };
+        }
+
+        /// <summary>
+        /// A <c>.nomapz</c> (<see cref="NomapzHeader"/>): its header read and checked, then the bundle in
+        /// it opened with <c>AssetBundle.LoadFromStream</c> through a <see cref="NomapzStream"/>, which
+        /// stays open with the bundle. A header this build cannot read is refused here, saying why.
+        /// </summary>
+        static LoadedMap OpenPacked(string path)
+        {
+            long start = Stopwatch.GetTimestamp();
+
+            NomapzHeader header;
+            try
+            {
+                header = NomapzHeader.Read(path);
+            }
+            catch (NomapzFormatException e)
+            {
+                Plugin.LogError($"{path}: cannot be loaded: " + WhyNotLoaded(path, e));
+                return null;
+            }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
+            {
+                Plugin.LogError($"{path}: cannot be read: {e.Message}");
+                return null;
+            }
+
+            NomapzStream stream;
+            try
+            {
+                stream = new NomapzStream(path, header);
+            }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
+            {
+                Plugin.LogError($"{path}: cannot be read: {e.Message}");
+                return null;
+            }
+
+            AssetBundle bundle = null;
+            try
+            {
+                bundle = AssetBundle.LoadFromStream(stream);
+            }
+            catch (Exception e)
+            {
+                Plugin.LogError($"{path}: AssetBundle.LoadFromStream threw: {e.Message}");
+            }
+
+            if (bundle == null)
+            {
+                string failure = stream.Failure;
+                stream.Dispose();
+                Plugin.LogError($"{path}: AssetBundle.LoadFromStream returned null. " +
+                                (failure != null
+                                    ? $"A chunk of the file does not decode ({failure}): it is damaged. Download it again."
+                                    : WhyNotLoaded(path)));
+                return null;
+            }
+
+            Plugin.LogInfo($"{Path.GetFileName(path)}: {header.Describe()}, opened through a decoding stream " +
+                           $"in {LoadedMap.Seconds(start, Stopwatch.GetTimestamp()) * 1000:0} ms");
+            return new LoadedMap { File = path, Bundle = bundle, Packed = header, Stream = stream };
         }
 
         /// <summary>
@@ -341,15 +499,28 @@ namespace CustomMaps
         /// (20–35 ms with the cache file read, measured under Unity's Mono, one process per start),
         /// and the first start after a map is installed or updated hashes it while the game loads its
         /// menus.
+        ///
+        /// A <c>.nomapz</c> needs no hash for its name: that is the identity in its header, the
+        /// <c>.nomap</c>'s hash, so it registers as the <c>.nomap</c> of its build does. The thread
+        /// checks it afterwards instead (<see cref="HashAll"/>).
         /// </summary>
         static void BeginHashing()
         {
             var jobs = new List<HashJob>(_opened.Count);
-            foreach (LoadedMap map in _opened) jobs.Add(new HashJob { Map = map, Path = map.File });
+            foreach (LoadedMap map in _opened)
+                jobs.Add(new HashJob
+                {
+                    Map = map,
+                    Path = map.File,
+                    Packed = map.Packed != null,
+                    Identity = map.Packed?.IdentityHex,
+                });
 
             string cacheFile = HashCacheFile();
             _jobs = jobs;
             _hashed = false;
+            _checked = false;
+            _namesIn.Reset();
             _settled = false;
 
             try
@@ -370,21 +541,67 @@ namespace CustomMaps
             }
         }
 
-        /// <summary>The hashing thread. Touches no Unity API and does not log: everything it learns
-        /// goes into the jobs, for <see cref="Settle"/> to act on.</summary>
+        /// <summary>
+        /// The hashing thread. Touches no Unity API and does not log: everything it learns goes into the
+        /// jobs, for <see cref="Settle"/> and <see cref="ReportChecks"/> to act on.
+        ///
+        /// First the <c>.nomap</c> files, whose names wait for their hashes; then, with the names all in
+        /// and <see cref="Settle"/> free to go on, each <c>.nomapz</c> the hash cache does not remember:
+        /// hashed whole, and every chunk decoded against the payload hash in its header, which tells a
+        /// damaged download from a sound one. Only a file that passes is remembered, so that costs the
+        /// first start after a map is installed and no other: about 20 s of this thread for Swiss Alps
+        /// 0.4.0 under the game's Mono, estimated (640 MB hashed, 2.1 GB decoded on two more threads and
+        /// hashed), while the game loads its menus.
+        /// </summary>
         static void HashAll(List<HashJob> jobs, string cacheFile)
         {
+            BundleHashCache cache = null;
             try
             {
-                BundleHashCache cache = cacheFile != null ? BundleHashCache.Load(cacheFile) : null;
+                cache = cacheFile != null ? BundleHashCache.Load(cacheFile) : null;
 
                 foreach (HashJob job in jobs)
                 {
+                    if (job.Packed) continue;
+
                     var watch = Stopwatch.StartNew();
                     try
                     {
                         job.Hash = BundleHash.Resolve(job.Path, cache, out bool remembered);
                         job.Remembered = remembered;
+                    }
+                    catch (Exception e)
+                    {
+                        job.Error = e.Message;
+                    }
+                    job.Seconds = watch.Elapsed.TotalSeconds;
+                }
+            }
+            catch (Exception e)
+            {
+                _cacheProblem = e.Message;
+            }
+            finally
+            {
+                _hashed = true;
+                _namesIn.Set();
+            }
+
+            try
+            {
+                foreach (HashJob job in jobs)
+                {
+                    if (!job.Packed) continue;
+
+                    var watch = Stopwatch.StartNew();
+                    try
+                    {
+                        NomapzHeader header = job.Map.Packed;
+                        job.Hash = BundleHash.Resolve(job.Path, cache,
+                                                      () => NomapzChunks.Check(job.Path, header, 2, null, CancellationToken.None),
+                                                      out bool remembered, out string problem);
+                        job.Remembered = remembered;
+                        job.Problem = problem;
                     }
                     catch (Exception e)
                     {
@@ -405,12 +622,12 @@ namespace CustomMaps
             }
             finally
             {
-                _hashed = true;
+                _checked = true;
             }
         }
 
-        /// <summary>Registers the hashed maps, once, waiting for the hashing thread if it is still
-        /// running. Main thread only.</summary>
+        /// <summary>Registers the hashed maps, once, waiting for the hashing thread to have their names
+        /// if it is still working them out. Main thread only.</summary>
         static void Settle()
         {
             if (_settled) return;
@@ -419,8 +636,7 @@ namespace CustomMaps
             if (_hashing != null)
             {
                 long start = Stopwatch.GetTimestamp();
-                _hashing.Join();
-                _hashing = null;
+                _namesIn.Wait();
 
                 // Only the first start after a map is installed or updated can wait long, and only if
                 // the game asks for a map before its hash is in. A second or more is worth seeing
@@ -436,30 +652,70 @@ namespace CustomMaps
                 try { Register(job); }
                 catch (Exception e) { Plugin.LogError($"{job.Path}: {e}"); }
             }
-            _jobs = null;
-
-            if (_cacheProblem != null)
-                Plugin.LogDebug($"could not save the bundle hashes for the next start: {_cacheProblem}");
 
             Plugin.LogInfo($"loaded {_maps.Count} of {_found} bundle(s): " +
                            string.Join(", ", _maps.ConvertAll(m => m.Name())));
         }
 
+        /// <summary>
+        /// Says what the hashing thread found of each <c>.nomapz</c>, once it is done: a damaged file as
+        /// an error, a sound one in the debug log with its SHA-256 (what a release lists for its
+        /// download). Main thread, after <see cref="Settle"/>.
+        /// </summary>
+        static void ReportChecks()
+        {
+            if (_jobs == null) return;
+
+            foreach (HashJob job in _jobs)
+            {
+                if (!job.Packed) continue;
+                string file = Path.GetFileName(job.Path);
+
+                if (job.Error != null)
+                    Plugin.LogWarning($"{file}: could not check the file: {job.Error}");
+                else if (job.Problem != null)
+                    Plugin.LogError($"{file} is damaged: {job.Problem}. The map may fail to load or load wrong; " +
+                                    "download it again.");
+                else
+                    Plugin.LogDebug($"{file}: sha256={job.Hash} " +
+                                    (job.Remembered
+                                        ? $"(checked at an earlier start, file recognised in {job.Seconds:0.00} s)"
+                                        : $"(hashed and every chunk checked in {job.Seconds:0.0} s)"));
+            }
+            _jobs = null;
+
+            if (_cacheProblem != null)
+                Plugin.LogDebug($"could not save the bundle hashes for the next start: {_cacheProblem}");
+        }
+
         static void Register(HashJob job)
         {
             LoadedMap map = job.Map;
-            if (job.Hash == null)
+            if (job.Packed)
             {
-                Plugin.LogError($"{job.Path}: could not hash the bundle: {job.Error ?? "the hashing thread stopped"}");
-                return;
+                // The .nomap's hash, from the header: the name the .nomap of this build registers under.
+                // The job's other fields belong to the hashing thread until it has checked the file.
+                map.ContentHash = job.Identity;
             }
-
-            map.ContentHash = job.Hash;
+            else
+            {
+                if (job.Hash == null)
+                {
+                    Plugin.LogError($"{job.Path}: could not hash the bundle: {job.Error ?? "the hashing thread stopped"}");
+                    return;
+                }
+                map.ContentHash = job.Hash;
+            }
 
             map.Details = ScriptableObject.CreateInstance<MapDetails>();
             map.Details.PrefabName = map.Manifest.PrefabNameFor(map.ContentHash);
             map.Details.MapName = map.Manifest.DisplayName;
-            map.Details.MapImage = map.Asset<Sprite>(map.Manifest.MapImage);
+            // No MapImage here. In the game it is read by one thing, the New Mission panel's map tile
+            // (NewMissionMapButton.SetMap); the tactical map reads MapSettings.MapImage, which MapFixups sets
+            // when the map is prepared. It used to be the map's chart, read whole on the main thread at every
+            // start for every installed map and kept all session (8192 by 8192 on Swiss Alps 0.4.0, 43 to 85
+            // MiB), for a tile the game never showed. The tile now gets a 512 by 512 picture of its own,
+            // made when the panel first shows it and cached (MapThumbnails).
             // Survives scene loads; without this the MapDetails is collected and every
             // array we appended it to holds a destroyed reference.
             UnityEngine.Object.DontDestroyOnLoad(map.Details);
@@ -468,11 +724,13 @@ namespace CustomMaps
             _maps.Add(map);
 
             Plugin.LogInfo($"{Path.GetFileName(map.File)} -> {map.Details.PrefabName} " +
-                           $"(\"{map.Details.MapName}\", {map.Manifest.MapSizeX:0}x{map.Manifest.MapSizeY:0} m)");
-            Plugin.LogDebug($"  sha256={map.ContentHash} " +
-                            (job.Remembered
-                                ? $"(remembered from an earlier start, file checked in {job.Seconds:0.00} s)"
-                                : $"(hashed in full in {job.Seconds:0.00} s)"));
+                           $"(\"{map.Details.MapName}\", {map.Manifest.MapSizeX:0}x{map.Manifest.MapSizeY:0} m, {map.Format})");
+            Plugin.LogDebug(job.Packed
+                ? $"  identity={map.ContentHash} (from the .nomapz header: the SHA-256 of the .nomap of this build)"
+                : $"  sha256={map.ContentHash} " +
+                  (job.Remembered
+                      ? $"(remembered from an earlier start, file checked in {job.Seconds:0.00} s)"
+                      : $"(hashed in full in {job.Seconds:0.00} s)"));
         }
 
         /// <summary>Where the hashes are remembered, or null (nothing remembered) if BepInEx cannot
@@ -519,9 +777,21 @@ namespace CustomMaps
                            "only one bundle of a map. Keep one build of each map installed.";
             }
 
-            return "The file is not an AssetBundle, was built with a Unity version whose serialization this " +
+            return (path.EndsWith(NomapzHeader.Extension, StringComparison.OrdinalIgnoreCase)
+                       ? "The .nomapz's header and chunks read, but Unity did not take the bundle in it: it "
+                       : "The file is not an AssetBundle, ") +
+                   "was built with a Unity version whose serialization this " +
                    "build of the game cannot read (the game is 2022.3.62f2), or is another build of a map " +
                    "already loaded (Player.log then says another AssetBundle has the same files).";
+        }
+
+        /// <summary>Why a <c>.nomapz</c> whose header this build refused was not loaded: a newer format or
+        /// codec than this plugin reads, or a damaged or unfinished file.</summary>
+        static string WhyNotLoaded(string path, NomapzFormatException refused)
+        {
+            return refused.NeedsNewerReader
+                ? $"{refused.Message} This is NOCustomMaps {Plugin.Version}: update it to load this map."
+                : $"{refused.Message}. Download {Path.GetFileName(path)} again.";
         }
 
         static MapManifest ReadManifest(AssetBundle bundle, string path)

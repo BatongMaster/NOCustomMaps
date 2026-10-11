@@ -7,7 +7,7 @@
     <RootNamespace>CustomMaps</RootNamespace>
     <!-- The DLL's own version, which mod managers (NOMM, via NOMNOM) compare with the release.
          Keep it equal to Plugin.Version. -->
-    <Version>1.3.0</Version>
+    <Version>1.4.0</Version>
     <!-- Where a local build installs itself. Empty or non-existent skips the copy,
          which is what CI does. -->
     <DeployDir Condition="'$(DeployDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Nuclear Option\BepInEx\plugins\NOCustomMaps</DeployDir>
@@ -46,6 +46,12 @@
 
   <ItemGroup>
     <PackageReference Include="BepInEx.AssemblyPublicizer.MSBuild" Version="0.4.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- DOORMAN's preview card (name, description, links and logo), read from inside the DLL. -->
+  <ItemGroup>
+    <EmbeddedResource Include="NOCustomMaps.doorman.json" LogicalName="doorman.json" />
+    <EmbeddedResource Include="NOCM-logo.png" LogicalName="NOCM-logo.png" />
   </ItemGroup>
 
   <ItemGroup>

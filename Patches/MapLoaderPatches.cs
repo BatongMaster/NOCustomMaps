@@ -79,7 +79,7 @@ namespace CustomMaps.Patches
             string message = mine == null
                 ? $"This server is running the custom map '{wantedId}', which you do not have installed."
                 : $"Custom map '{wantedId}' version mismatch — the server has build {wantedHash}, you have {mine}. " +
-                  "You need the identical .nomap file.";
+                  "You need the same build of the map (its .nomap or its .nomapz).";
 
             Plugin.LogError(message);
             Plugin.ShowJoinFailure(message);

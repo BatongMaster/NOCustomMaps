@@ -28,7 +28,8 @@ namespace CustomMaps
             bool ok = true;
 
             report.AppendLine($"validate {map.PrefabName}");
-            Line(report, "file", $"{System.IO.Path.GetFileName(map.File)} (sha256 {map.ContentHash?.Substring(0, 12)}…)");
+            Line(report, "file", $"{System.IO.Path.GetFileName(map.File)} ({map.Format}; " +
+                                 $"{(map.Packed != null ? "identity" : "sha256")} {map.ContentHash?.Substring(0, 12)}…)");
             Line(report, "name", $"\"{map.Details.MapName}\"");
             Line(report, "built against", $"game {map.Manifest.BuiltAgainstGameHash ?? "<unrecorded>"}");
 
@@ -140,7 +141,7 @@ namespace CustomMaps
             }
 
             Line(report, "ocean", $"basecolor {Describe(settings.OceanBasecolor)}, depth {Describe(settings.OceanDepthmap)}");
-            Line(report, "lake water", DescribeLakeVolumes(settings));
+            Line(report, "lake water", DescribeLakeWater(map));
             Line(report, "music", $"{settings.factionMusic?.Length ?? 0} faction entries");
 
             if (!MapIdentity.IsValidMapName(map.Details.MapName, out string nameReason))
@@ -159,6 +160,7 @@ namespace CustomMaps
             Line(report, "airfields", DescribeAirfieldPaving(settings));
             Line(report, "buildings", DescribeBuildings(map));
             Line(report, "airfield paint", DescribeAirfieldPaint(settings));
+            Line(report, "tire marks", DescribeTireMarks(settings));
 
             report.Append("  => ").Append(ok ? "OK" : "REJECTED");
 
@@ -198,35 +200,21 @@ namespace CustomMaps
         static string Describe(Texture2D t) => t != null ? $"{t.width}x{t.height}" : "absent";
 
         /// <summary>
-        /// Whether the raised lakes hold water, or are sheets an aircraft can fly under.
+        /// Whether the raised lakes are water to the game, or sheets an aircraft can fly under.
         ///
-        /// Their water is trigger boxes carrying the game's water PhysicMaterial
-        /// (<c>MapFixups.BindLakeVolumes</c>). Nothing else shows whether that worked: a volume
-        /// left off, or a bundle built before there were any, looks exactly like a lake that holds
-        /// water until something flies under it.
+        /// Two things make them water: their footprints and heights, read from the sheets
+        /// (<see cref="LakeWater.Read"/>), and the game's water tests patched to ask for them
+        /// (<see cref="Patches.LakeWaterPatches"/>). Nothing else shows whether either worked: a
+        /// lake that is not water looks exactly like one that is until something flies under it.
         /// </summary>
-        static string DescribeLakeVolumes(MapSettings settings)
+        static string DescribeLakeWater(LoadedMap map)
         {
-            Transform water = settings.transform.Find(MapFixups.WaterRoot);
-            if (water == null) return "none — this map has no lakes above the sea";
+            string reading = LakeWater.ReadingFor(map) ?? "not read";
+            if (!LakeWater.HasLakes(map)) return reading;
 
-            BoxCollider[] volumes = water.GetComponentsInChildren<BoxCollider>(true);
-            if (volumes.Length == 0)
-                return $"{water.childCount} lake(s) with no water volumes  WARN — a bundle built before lakes held " +
-                       "water: aircraft fly under them. Rebuild the map.";
-
-            PhysicMaterial material = MapFixups.LakeWaterMaterial;
-            int on = 0, wet = 0;
-            foreach (BoxCollider volume in volumes)
-            {
-                if (volume.enabled) on++;
-                if (material != null && volume.sharedMaterial == material && volume.isTrigger) wet++;
-            }
-
-            string counts = $"{volumes.Length} volume(s) under {water.childCount} lake(s), {on} on";
-            if (on == volumes.Length && wet == volumes.Length) return $"{counts}, '{material.name}'  OK";
-            if (on == 0) return $"{counts}  WARN — no water PhysicMaterial, so they stay off and aircraft fly under the lakes";
-            return $"{counts}, {wet} carrying the water material  WARN — a volume on without it is a floor, not water";
+            if (Patches.LakeWaterPatches.AllApplied) return $"{reading}; {Patches.LakeWaterPatches.Summary}  OK";
+            return $"{reading}; {Patches.LakeWaterPatches.Summary}  WARN — what is not patched treats the lakes as dry " +
+                   "(the log above names it)";
         }
 
         /// <summary>
@@ -415,6 +403,37 @@ namespace CustomMaps
             return $"{fields} field(s), {triangles:N0} triangles, {painted} with '{MapFixups.MarkingsMaterialName}', {shown} shown, " +
                    $"{channels} with texture coordinates and colours" +
                    (ok ? "  OK" : "  WARN: a field without all three draws no paint, or the wrong one");
+        }
+
+        /// <summary>
+        /// The runways' tire marks, one mesh a field: each needs the game's tire-mark material and switched
+        /// on (MapFixups does both), and its texture coordinates through the bundle, the whole texture
+        /// stretched over each patch.
+        /// </summary>
+        static string DescribeTireMarks(MapSettings settings)
+        {
+            Transform root = settings.transform.Find(MapFixups.TireMarksRoot);
+            if (root == null) return "none: a bundle built before them, no drawn airfield, or every runway set off";
+
+            int fields = 0, shown = 0, marked = 0, channels = 0, triangles = 0;
+            foreach (MeshRenderer renderer in root.GetComponentsInChildren<MeshRenderer>(true))
+            {
+                Mesh mesh = renderer.TryGetComponent(out MeshFilter filter) ? filter.sharedMesh : null;
+                if (mesh == null) continue;
+
+                fields++;
+                triangles += (int)(mesh.GetIndexCount(0) / 3);
+                if (renderer.enabled) shown++;
+                if (renderer.sharedMaterial != null && renderer.sharedMaterial.name == MapFixups.TireMarksMaterialName) marked++;
+                if (mesh.HasVertexAttribute(VertexAttribute.TexCoord0)) channels++;
+            }
+
+            if (fields == 0) return $"'{MapFixups.TireMarksRoot}' holds no mesh  WARN";
+
+            bool ok = shown == fields && marked == fields && channels == fields;
+            return $"{fields} field(s), {triangles:N0} triangles, {marked} with '{MapFixups.TireMarksMaterialName}', {shown} shown, " +
+                   $"{channels} with texture coordinates" +
+                   (ok ? "  OK" : "  WARN: a field without all three draws no tire marks, or the wrong ones");
         }
 
         /// <summary>The lengths of the runways after the main one, as " + 1,200 + 900 m", or empty

@@ -22,6 +22,13 @@ namespace CustomMaps.Patches
     /// shipped map's, on each axis, so a larger map keeps the same room past its edge that a
     /// shipped one has. A map no wider than 81,920 m is left exactly as the game has it.
     ///
+    /// A custom map may also zoom out further than a shipped one (<see cref="MapZoomPatch"/>).
+    /// There, below the game's least zoom of 1, the room shrinks with the zoom
+    /// (<see cref="MapZoom.PanFactor"/>) to none at the custom map's own least zoom, so zooming
+    /// fully out brings the whole map to the middle of the frame. At zoom 1 and above nothing
+    /// changes. A map following the aircraft goes on following it through that narrowing
+    /// (<see cref="MapZoom.KeepsFollowing"/>), so zooming back in finds the aircraft again.
+    ///
     /// <c>ClampPos</c> is a general helper, so the widening applies only while
     /// <c>MapControls</c> is running, the one call site this is about.
     /// </summary>
@@ -60,6 +67,13 @@ namespace CustomMaps.Patches
 
             if (beyond.x > 0f && rect.xMax > 0f) widened = Mathf.Max(widened, (factor * rect.xMax + beyond.x) / rect.xMax);
             if (beyond.y > 0f && rect.yMax > 0f) widened = Mathf.Max(widened, (factor * rect.yMax + beyond.y) / rect.yMax);
+
+            // Below the game's least zoom, which only a custom map reaches (MapZoomPatch), the
+            // room narrows with the zoom to none at the floor, so a fully zoomed-out map sits
+            // whole in the middle of the frame. Never throws, and leaves the factor as it was if
+            // anything it reads is gone.
+            if (MapZooms.Supported && MapZooms.CustomMap)
+                widened = MapZooms.NarrowPan(map, widened, image.localScale.x);
 
             factor = widened;
         }

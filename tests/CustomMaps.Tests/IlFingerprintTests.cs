@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
@@ -107,6 +108,27 @@ namespace CustomMaps.Tests
         }
 
         /// <summary>
+        /// A loaded method's fingerprint, its names asked of the runtime as a patch asks the game's
+        /// (<see cref="IlFingerprint.OfLoadedMethod"/>), is the one read from its file's metadata as the tests
+        /// read the game's DLL (<see cref="GameMethodPrint"/>). Run on methods of this assembly, which is
+        /// loaded and on disk, chosen for what they name: string literals, members of generic types,
+        /// generic methods (the interpolated message's <c>AppendFormatted&lt;T&gt;</c>) and a lambda.
+        /// </summary>
+        [Theory]
+        [InlineData("IlFingerprint", "Read")]
+        [InlineData("IlFingerprint", "FunctionPointers")]
+        [InlineData("IlFingerprint", "OfLoadedMethod")]
+        [InlineData("ApproachLine", "Extra")]
+        public void TheRuntimeAndTheFileReadTheSameNames(string type, string method)
+        {
+            MethodInfo loaded = typeof(IlFingerprint).Assembly.GetType("CustomMaps." + type)
+                .GetMethod(method, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.Equal(GameMethodPrint(typeof(IlFingerprint).Assembly.Location, "CustomMaps", type, method),
+                         IlFingerprint.OfLoadedMethod(loaded));
+        }
+
+        /// <summary>
         /// The game's <c>RoadPathfinder.TryPathfind</c>, and the two <c>ClearPathfindingData</c> it starts
         /// with, read from its DLL, are the methods <see cref="RoadPathSearch"/> and the patch were checked
         /// against (<see cref="RoadPathSearch.GameMethods"/>). Reads the Assembly-CSharp.dll the plugin
@@ -138,7 +160,7 @@ namespace CustomMaps.Tests
                 "and the opening FastRoadPathfinder copies, then set RoadPathSearch.VerifiedGameMethods to that value.");
         }
 
-        static string GameAssembly()
+        internal static string GameAssembly()
         {
             var dirs = new List<string>();
             string configured = Environment.GetEnvironmentVariable("ManagedDir");

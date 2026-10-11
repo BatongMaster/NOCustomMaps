@@ -1,0 +1,11 @@
+{
+  "plugin": "com.javoski.custommaps",
+  "name": "NOCustomMaps",
+  "description": "Loads custom maps into Nuclear Option. Each .nomap is registered with the game, so it can be picked for missions and multiplayer like the built-in maps. The server and every player need the same .nomap file.",
+  "image": "NOCM-logo.png",
+  "links": [
+    { "label": "GitHub", "url": "https://github.com/BatongMaster/NOCustomMaps" },
+    { "label": "Swiss Alps map", "url": "https://github.com/BatongMaster/NOSwissAlps" },
+    { "label": "Making maps", "url": "https://github.com/BatongMaster/NOCustomMapsCreator" }
+  ]
+}

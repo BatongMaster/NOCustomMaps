@@ -26,7 +26,7 @@ namespace CustomMaps
     public sealed class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.javoski.custommaps";
-        public const string Version = "1.3.0";
+        public const string Version = "1.4.0";
 
         internal static Plugin Instance { get; private set; }
         static ManualLogSource _log;
@@ -41,6 +41,9 @@ namespace CustomMaps
         internal static ConfigEntry<bool> ValidateOnLoad;
         internal static ConfigEntry<string> DonorMap;
         internal static ConfigEntry<bool> BorrowDetailRenderer;
+        internal static ConfigEntry<bool> MissionEditorMapTiles;
+        internal static ConfigEntry<int> NewMissionTileCopies;
+
 
         void Awake()
         {
@@ -82,7 +85,36 @@ namespace CustomMaps
                 LogError($"scanning for map bundles failed: {e}");
             }
 
+            ApplyLakeWaterPatches();
+
             LogInfo($"v{Version} ready. Map directories: {string.Join(" | ", ResolveMapDirectories())}");
+        }
+
+        /// <summary>
+        /// Points the game's water tests at a custom map's raised lakes, when an installed map has
+        /// any (its manifest lists them). They touch 78 of the game's own methods, so a game
+        /// without such a map runs them as they are; the helpers they call give the sea's own
+        /// answer wherever there is no lake, so once applied the base maps play exactly as before.
+        /// Done at start-up, before anything has run those methods, so nothing has compiled the
+        /// originals into a caller. A map whose sheets are found without its manifest listing them
+        /// applies them when it is prepared instead.
+        /// </summary>
+        static void ApplyLakeWaterPatches()
+        {
+            try
+            {
+                foreach (LoadedMap map in BundleLoader.Maps)
+                {
+                    if (map.Manifest?.Lakes == null || map.Manifest.Lakes.Count == 0) continue;
+
+                    Patches.LakeWaterPatches.Apply(new Harmony(Guid));
+                    return;
+                }
+            }
+            catch (Exception e)
+            {
+                LogWarning($"lake water: {e.Message}");
+            }
         }
 
         /// <summary>
@@ -112,7 +144,7 @@ namespace CustomMaps
         {
             MapDirectories = Config.Bind(
                 "General", "MapDirectories", "",
-                "Extra directories to scan for .nomap bundles, separated by ';'. These are searched " +
+                "Extra directories to scan for .nomap and .nomapz bundles, separated by ';'. These are searched " +
                 "before the defaults. Leave empty to use only BepInEx/plugins/NOCustomMaps/maps and " +
                 "the CustomMaps folder under the game's persistent data path.");
 
@@ -127,6 +159,12 @@ namespace CustomMaps
                 "fails. Turning this off will not make a broken map work; it will move the failure " +
                 "from a log line to a hard lock partway through loading.");
 
+            MissionEditorMapTiles = Config.Bind(
+                "General", "MissionEditorMapTiles", true,
+                "Show the installed custom maps as tiles in the mission editor's New Mission panel, after Heartland " +
+                "and Ignus Archipelago, in a list that scrolls. Off leaves the panel as the game has it, and a " +
+                "mission's map is then set by hand (MapKey.Path). Applies at the next start.");
+
             BorrowDetailRenderer = Config.Bind(
                 "Advanced", "BorrowDetailRenderer", true,
                 "Clone the donor map's DetailRenderer_Base subtree (TerrainHeightMap, DetailRenderer, " +
@@ -139,10 +177,17 @@ namespace CustomMaps
                 "PrefabName of the shipped map to copy base-game assets from — the terrain " +
                 "PhysicMaterial that TerrainHeightMap and TerrainScatter test against, and the " +
                 "faction music array. 'Terrain1' is Heartland, 'Terrain_naval' is Ignus Archipelago.");
+
+            NewMissionTileCopies = Config.Bind(
+                "Advanced", "NewMissionTileCopies", 1,
+                new ConfigDescription(
+                    "Testing only. Shows each custom map this many times in the mission editor's New Mission panel, " +
+                    "to try its scrolling list with many maps; every copy selects the same map. Leave at 1.",
+                    new AcceptableValueRange<int>(1, 50)));
         }
 
         /// <summary>
-        /// Search roots for <c>.nomap</c> bundles, highest precedence first.
+        /// Search roots for <c>.nomap</c> and <c>.nomapz</c> bundles, highest precedence first.
         ///
         /// The plugin folder comes before the persistent data path deliberately. The
         /// release archive extracts over the game directory, so that is where a server
@@ -230,7 +275,7 @@ namespace CustomMaps
                 string target = ownFolder ? beside : nested;
 
                 Directory.CreateDirectory(target);
-                LogInfo($"created {target}; put .nomap files there");
+                LogInfo($"created {target}; put .nomap or .nomapz files there");
             }
             catch (Exception e)
             {
@@ -281,9 +326,12 @@ namespace CustomMaps
             Field(typeof(Airbase), AirbaseBuilder.ServicePointsField, critical: false);
             Method(typeof(DynamicMap), "MapControls", critical: false);
             Method(typeof(MathExtensions), nameof(MathExtensions.ClampPos), critical: false);
-            Field(typeof(GameAssets), "loader", critical: false);
-            Field(typeof(GameAssets), nameof(GameAssets.WaterMaterial), critical: false);
+            Field(typeof(DynamicMap), "mapImage", critical: false);
+            Field(typeof(DynamicMap), "mapBackground", critical: false);
+            Field(typeof(DynamicMap), "mapScaleMaximized", critical: false);
             Method(typeof(LandingGear), "FixedUpdate", critical: false);
+            Method(typeof(AeroPart), "UpdateJobFields", critical: false);
+            Field(typeof(AeroPart), "submergedAmount", critical: false);
             Method(typeof(RoadPathfinder), nameof(RoadPathfinder.TryPathfind), critical: false);
             Method(typeof(Shockwave), "Start", critical: false);
             Field(typeof(Shockwave), "colliderBuffer", critical: false);
@@ -298,6 +346,21 @@ namespace CustomMaps
             Field(typeof(LandingGear), "aircraft", critical: false);
             Field(typeof(LevelInfo), "waterPlane", critical: false);
 
+            // The HUD's landing glideslope first shown 10 nm long (ApproachLinePatches).
+            foreach (string method in ApproachLine.GameMethods)
+                Method(typeof(AirbaseOverlay), method, critical: false);
+            Field(typeof(AirbaseOverlay), "nearestAirbase", critical: false);
+
+            // The custom maps' tiles in the mission editor's New Mission panel (NewMissionMenuPatches).
+            Type newMenu = typeof(NuclearOption.MissionEditorScripts.MissionEditorNewMenuV2);
+            Type mapButton = typeof(NuclearOption.MissionEditorScripts.NewMissionMapButton);
+            foreach (string[] method in MapTiles.GameMethods)
+                Method(method[1] == mapButton.Name ? mapButton : newMenu, method[2], critical: false);
+            foreach (string field in new[] { "mapLoader", "mapButtons", "selectedMap" })
+                Field(newMenu, field, critical: false);
+            foreach (string field in new[] { "mapDetails", "text", "image", "button" })
+                Field(mapButton, field, critical: false);
+
             // A mission's own airbase roads (MissionAirbaseRoads).
             Field(typeof(NuclearOption.SavedMission.SavedAirbase), "roads", critical: false);
             Method(typeof(NuclearOption.SavedMission.SavedAirbase), "BeforeSave", critical: false);
@@ -306,6 +369,16 @@ namespace CustomMaps
             Method(typeof(NuclearOption.MissionEditorScripts.RoadEditor), "VisualizeNetworks", critical: false);
             foreach (string edit in Patches.MissionAirbaseRoadEditPatch.Edits)
                 Method(typeof(NuclearOption.MissionEditorScripts.RoadEditor), edit, critical: false);
+
+            // AutoAim is overloaded, so it is named with its parameters in the patches' own checks.
+            Method(typeof(Autopilot), "TerrainWaypoint", critical: false);
+            Method(typeof(Airbase), nameof(Airbase.RequestLanding), critical: false);
+            Field(typeof(AIPilotCombatModes), "attackMode", critical: false);
+            Field(typeof(AIPilotCombatModes), "ignoreCollision", critical: false);
+            Field(typeof(AIPilotCombatModes), "followTerrain", critical: false);
+            Field(typeof(AIHeloTakeoffState), "rotorShaft", critical: false);
+            Field(typeof(AIPilotLandingState), "reachedFinal", critical: false);
+            Field(typeof(AircraftParameters), "minimumRadarAlt", critical: false);
 
             return ok;
         }
@@ -358,10 +431,15 @@ namespace CustomMaps
             Patch(harmony, typeof(Patches.MapPanPatch), critical: false);
             Patch(harmony, typeof(Patches.MapPanClampPatch), critical: false);
 
-            // A wheel's line-cast that ignores triggers, so an aircraft cannot land on a lake's
-            // water volumes as on tarmac. Without it lakes still hold water; the gear just rolls
-            // on them.
-            Patch(harmony, typeof(Patches.LandingGearTriggerPatch), critical: false);
+            // Which map's raised lakes are in play, if any, for the game's water tests (patched
+            // separately, by ApplyLakeWaterPatches). Without it the lakes are never water.
+            Patch(harmony, typeof(Patches.LakeWaterMapPatch), critical: false);
+
+            // The M map's least zoom on a custom map, low enough to show the whole map. Without it
+            // the map zooms out only as far as a shipped 82 km map needs. Both skip themselves
+            // (Prepare) when the game no longer has the members they use.
+            Patch(harmony, typeof(Patches.MapZoomPatch), critical: false);
+            Patch(harmony, typeof(Patches.MapZoomMapPatch), critical: false);
 
             // Room in the game's 4,096-collider shockwave buffer for a nuke over a custom map with
             // more colliders in reach than it holds. Without it a big warhead there can leave the
@@ -400,6 +478,32 @@ namespace CustomMaps
             // when the game's search is not the one they were checked against.
             Patch(harmony, typeof(Patches.RoadPathfinderMapPatch), critical: false);
             Patch(harmony, typeof(Patches.RoadPathfinderPatch), critical: false);
+
+            // The HUD's landing glideslope at a custom map's airbases first shown 10 nm long, where the game
+            // takes the runway only within capture range plus 5 km and so draws it about 3 nm long. Without
+            // them the line is the game's. Both skip themselves (Prepare) when the game's overlay is not the
+            // one they were checked against.
+            Patch(harmony, typeof(Patches.ApproachLineMapPatch), critical: false);
+            Patch(harmony, typeof(Patches.ApproachLinePatch), critical: false);
+
+            // The installed custom maps offered as tiles in the mission editor's New Mission panel, in a list that
+            // scrolls. Without it the panel offers the game's two maps, and a mission's map is set by hand. Skips
+            // itself (Prepare) when the option is off or the game's panel is not the one it was checked against.
+            Patch(harmony, typeof(Patches.NewMissionMapTilesPatch), critical: false);
+
+            // AI aircraft and helicopters that see a custom map's mountains in time to clear them
+            // (AITerrain). Without them the AI flies as on the base maps, and into the Alps. Each
+            // stands alone and skips itself (Prepare) when the game no longer has what it uses.
+            Patch(harmony, typeof(Patches.AITerrainMapPatch), critical: false);
+            Patch(harmony, typeof(Patches.TerrainWaypointPatch), critical: false);
+            Patch(harmony, typeof(Patches.PlaneFloorPatch), critical: false);
+            Patch(harmony, typeof(Patches.CombatFlagsPatch), critical: false);
+            Patch(harmony, typeof(Patches.LandingEndPatch), critical: false);
+            Patch(harmony, typeof(Patches.HelicopterPlanPatch), critical: false);
+            Patch(harmony, typeof(Patches.HelicopterBoresightPatch), critical: false);
+            Patch(harmony, typeof(Patches.TiltrotorPlanPatch), critical: false);
+            Patch(harmony, typeof(Patches.TiltrotorBoresightPatch), critical: false);
+            Patch(harmony, typeof(Patches.HelicopterTakeoffPatch), critical: false);
 
             if (!ok)
                 LogError("a critical patch could not be applied, so no maps will be registered. " +

@@ -21,8 +21,8 @@ namespace CustomMaps
         public override string ToString() => $"{(IsError ? "ERROR" : "WARN")} {Field}: {Message}";
     }
 
-    /// <summary>A visual-only water surface at a fixed height, in map metres relative to
-    /// the map centre.</summary>
+    /// <summary>A raised lake: a still water surface at a fixed height above the datum, in map
+    /// metres relative to the map centre, and the box round it.</summary>
     public sealed class LakeSurface
     {
         public string Name;
@@ -204,13 +204,16 @@ namespace CustomMaps
         /// <summary>
         /// Still water bodies that sit above the datum and so need their own surface.
         ///
-        /// The engine has exactly one water plane, at global y = 0, and every water
-        /// behaviour — buoyancy, ship propulsion, the underwater camera, chaff and flare
-        /// despawn — is a test against that height rather than against any mesh. A lake
-        /// at a different altitude can therefore be rendered but not simulated. These
-        /// are built as flat quads carrying the game's own water material, which is a
-        /// deliberate trade: on a mountain map nothing needs to sail Lake Thun, and the
-        /// alternative was flattening every lake onto one level that suits none of them.
+        /// The engine has exactly one water plane, at global y = 0, and nearly every water
+        /// behaviour (an aircraft ditching, engines drowning, bullets and bombs striking water,
+        /// buoyancy, the underwater camera, chaff and flare despawn) is a test against that
+        /// height rather than against any mesh. Each lake here is built as a flat sheet carrying
+        /// the game's own water material, and the plugin points those tests at the sheets, so
+        /// below a lake's surface over its sheet is water as below 0 is sea. Two things stay on
+        /// the sea: ships and boats (their physics is a Burst job; floating them on a lake is a
+        /// later feature that will use the same water level), and ground vehicles, which keep to
+        /// a lake's bed. The alternative was flattening every lake onto one level that suits none
+        /// of them.
         /// </summary>
         public List<LakeSurface> Lakes = new List<LakeSurface>();
 

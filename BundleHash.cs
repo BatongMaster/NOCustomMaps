@@ -106,8 +106,24 @@ namespace CustomMaps
         /// Throws what reading the file throws; nothing is remembered then.
         /// </summary>
         public static string Resolve(string path, BundleHashCache cache, out bool remembered)
+            => Resolve(path, cache, null, out remembered, out _);
+
+        /// <summary>
+        /// <see cref="Resolve(string,BundleHashCache,out bool)"/>, with a check of the file's contents run
+        /// after the hash whenever the file is not remembered: <paramref name="check"/> returns null for a
+        /// sound file and otherwise what is wrong with it, which comes back in <paramref name="problem"/>.
+        /// A file that fails it is not remembered, so it is checked again at the next start, and a
+        /// remembered one is one that passed.
+        ///
+        /// A <c>.nomapz</c> takes its map's name from its header, not from this hash. What it is hashed
+        /// for is this: its chunks are decoded once against the payload hash in its header, at the first
+        /// start after it is installed, to tell a damaged download from a sound one, and the file's own
+        /// SHA-256 is what a release lists for the download.
+        /// </summary>
+        public static string Resolve(string path, BundleHashCache cache, Func<string> check, out bool remembered, out string problem)
         {
             remembered = false;
+            problem = null;
             string full = Path.GetFullPath(path);
             long written = File.GetLastWriteTimeUtc(full).Ticks;
 
@@ -125,6 +141,12 @@ namespace CustomMaps
 
                 stream.Position = 0;
                 string hash = Sha256(stream);
+
+                if (check != null)
+                {
+                    problem = check();
+                    if (problem != null) return hash;
+                }
 
                 // Remembered only if the file did not change while it was read: otherwise the hash
                 // could be of a file that no longer exists, kept under the stamp of one that does.

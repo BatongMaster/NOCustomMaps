@@ -12,6 +12,9 @@ namespace CustomMaps
         /// <summary>The airfields' paint, <see cref="MaterialMarkers.Markings"/>.</summary>
         Markings,
 
+        /// <summary>The runways' tire marks, <see cref="MaterialMarkers.TireMarks"/>.</summary>
+        TireMarks,
+
         /// <summary>The ground: a bare <see cref="MaterialMarkers.Borrow"/>, one naming a surface this
         /// plugin does not know, or an empty slot.</summary>
         Terrain,
@@ -47,6 +50,10 @@ namespace CustomMaps
         /// <summary>Not a <see cref="Borrow"/> name, on purpose: <c>MapFixups.MarkingsMarker</c> says why.</summary>
         public const string Markings = "__MARKINGS__Runway";
 
+        /// <summary>Neither a <see cref="Borrow"/> name nor one starting with <see cref="Markings"/>, on
+        /// purpose: <c>MapFixups.TireMarksMarker</c> says why.</summary>
+        public const string TireMarks = "__TIREMARKS__Runway";
+
         /// <summary>
         /// The surface a slot asks for, from the name of the material in it (null for an empty slot).
         ///
@@ -58,6 +65,7 @@ namespace CustomMaps
         {
             if (materialName == null) return MaterialSlot.Terrain;
             if (materialName.StartsWith(Markings, StringComparison.Ordinal)) return MaterialSlot.Markings;
+            if (materialName.StartsWith(TireMarks, StringComparison.Ordinal)) return MaterialSlot.TireMarks;
             if (!materialName.StartsWith(Borrow, StringComparison.Ordinal)) return MaterialSlot.Own;
 
             if (materialName.StartsWith(Water, StringComparison.Ordinal)) return MaterialSlot.Water;

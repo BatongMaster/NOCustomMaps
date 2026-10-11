@@ -19,8 +19,8 @@ namespace CustomMaps
     /// (<see cref="OfMethod"/>).
     ///
     /// The names come from the caller because who resolves them differs: the plugin asks the running
-    /// game's <c>Module</c>, and the tests read the game's DLL from disk. Free of game types, so both use
-    /// this same walk over the IL.
+    /// game's <c>Module</c> (<see cref="OfLoadedMethod"/>), and the tests read the game's DLL from disk.
+    /// Free of game types, so both use this same walk over the IL.
     /// </summary>
     internal static class IlFingerprint
     {
@@ -37,6 +37,32 @@ namespace CustomMaps
             foreach (int token in FunctionPointers(il))
                 print = Combine(print, Of(body(token), name));
             return print;
+        }
+
+        /// <summary>
+        /// <see cref="OfMethod"/> for a method of a loaded assembly, every name resolved by the method's own
+        /// <c>Module</c>: how a patch reads the running game's. A string literal is its text, a signature
+        /// reads as <c>sig</c>, and a member or type is its <c>Name</c> (a generic type's without its
+        /// arguments, <c>List`1</c>).
+        /// </summary>
+        public static ulong OfLoadedMethod(MethodBase method)
+        {
+            if (method == null) throw new ArgumentNullException(nameof(method));
+
+            Module module = method.Module;
+            return OfMethod(method.GetMethodBody().GetILAsByteArray(),
+                token => LoadedName(module, token),
+                token => module.ResolveMethod(token).GetMethodBody().GetILAsByteArray());
+        }
+
+        static string LoadedName(Module module, int token)
+        {
+            switch ((uint)token >> 24)
+            {
+                case 0x70: return module.ResolveString(token);
+                case 0x11: return "sig";
+                default: return module.ResolveMember(token).Name;
+            }
         }
 
         /// <summary>FNV-1a over the opcodes, every operand that is not a token, and the name of what each
