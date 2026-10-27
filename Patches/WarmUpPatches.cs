@@ -62,7 +62,7 @@ namespace CustomMaps.Patches
 
     /// <summary>
     /// Starts reading a custom map's prefab when a mission on it is picked in the missions list
-    /// (<c>MissionsPicker</c>): for single player, for a lobby to host, and in the older mission
+    /// (<c>MissionPicker</c>): for single player, for a lobby to host, and in the older mission
     /// editor Load menu that is built on that list.
     ///
     /// Reading the briefing and pressing Start is time the load would otherwise spend behind the
@@ -70,10 +70,10 @@ namespace CustomMaps.Patches
     /// another map leaves the first map read for nothing, all session, as every installed map was at
     /// game start before.
     /// </summary>
-    [HarmonyPatch(typeof(MissionsPicker), nameof(MissionsPicker.SelectMission))]
+    [HarmonyPatch(typeof(MissionPicker), nameof(MissionPicker.SelectMission))]
     internal static class MissionPickWarmUpPatch
     {
-        static void Postfix(MissionsPicker __instance)
+        static void Postfix(MissionPicker __instance)
         {
             try
             {
@@ -92,7 +92,7 @@ namespace CustomMaps.Patches
     /// <summary>
     /// Starts reading a custom map's prefab when a mission on it is picked in the mission editor's
     /// own Load menu (File &gt; Load, <c>MissionEditorLoadMenuV2</c>), which is a list of its own and
-    /// not a <c>MissionsPicker</c>.
+    /// not a <c>MissionPicker</c>.
     ///
     /// A click picks the mission and shows its preview, a second click or the Load button loads it,
     /// so this buys the time spent looking at the preview: often less than the prefab takes, and

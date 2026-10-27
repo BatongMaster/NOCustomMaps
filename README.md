@@ -10,7 +10,7 @@ missions and multiplayer like the built-in maps.
 ### NOMM
 
 1. Search on NOMM for "Swiss Alps" and download it (it will take a while don't worry, it's a 730 MB download)
-2. Start the game. 'BepInEx/LogOutput.log' should show 'v1.4.0 ready.' and a line like
+2. Start the game. 'BepInEx/LogOutput.log' should show 'v1.4.1 ready.' and a line like
 'swissalps-<version>.nomapz -> cm.swissalps.<hash8> ("Swiss Alps", 199680x199680 m)'.
 
 ###  How to install manually (if you don't use NOMM)

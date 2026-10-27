@@ -54,6 +54,9 @@
     <!-- What an airbase is built from its taxi lanes: its roads, each runway's exits and which way
          each faces, its service point and landing pad. -->
     <Compile Include="..\..\TaxiPlan.cs" Link="Production\TaxiPlan.cs" />
+    <!-- One aircraft at a time on a custom map's runway strip: which runways are one strip, when a
+         take-off or a landing still holds it, and when an approach goes around. -->
+    <Compile Include="..\..\RunwayLock.cs" Link="Production\RunwayLock.cs" />
     <!-- How a mission's own airbase roads are told from a copy of the map's, and the runway exits
          made for them. -->
     <Compile Include="..\..\MissionTaxiRoads.cs" Link="Production\MissionTaxiRoads.cs" />

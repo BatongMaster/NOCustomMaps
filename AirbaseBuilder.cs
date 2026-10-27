@@ -295,6 +295,9 @@ namespace CustomMaps
             // without one. Only when even that cannot be built is the donor's emptied, as it always was.
             // A network that does not lie on this field's runways was made for where the field was
             // before: a taxiways.bin left from an earlier export beside airbases.bin from a later one.
+            //
+            // One aircraft per runway is set in Map Forge per airbase, and kept when the network is not.
+            bool oneAircraftPerRunway = lanes != null && lanes.OneAircraftPerRunway;
             if (lanes != null && !TaxiPlans.Fits(lanes, placement, out string misfit))
             {
                 Plugin.LogWarning($"airbase '{placement.UniqueName}': its taxi network in the map does not lie on its runways " +
@@ -315,10 +318,39 @@ namespace CustomMaps
 
             if (plan != null) PlaceServicePoints(clone, placement, plan);
 
+            // The take-off starts placed in Map Forge, each a take-off-only runway of its own after every
+            // other runway; none for a map without them, whose airbases are built exactly as before.
+            if (plan != null && (plan.Takeoffs.Count > 0 || plan.DroppedTakeoffs.Count > 0))
+                log.Add(LayOutTakeoffStarts(clone, placement, plan, runwayOf));
+
+            if (oneAircraftPerRunway) OneAircraftPerRunway(clone, placement, log);
+
             Rename(clone, placement);
             ForgetDonorTower(clone, placement);
 
             return clone;
+        }
+
+        /// <summary>
+        /// One aircraft at a time on each of the airbase's runways, as its map maker set in Map Forge
+        /// (<see cref="TaxiNetworkData.OneAircraftPerRunway"/>): every runway, take-off starts included, with
+        /// <c>AllowSimultaneousTakeoff</c> off. The game frees a runway that has it on as soon as an aircraft
+        /// lines up, so the next is cleared onto it while the first is still rolling, and every runway of
+        /// the base game, the donor's included, has it on. Off, a take-off holds its runway until it is off
+        /// the ground; the rest of the lock (<see cref="Patches.RunwayLocks"/>) tells the airbase's runways
+        /// by it. An airbase without the setting keeps the donor's, as the game shares runways.
+        /// </summary>
+        static void OneAircraftPerRunway(Airbase clone, AirbasePlacement placement, List<string> log)
+        {
+            int set = 0;
+            foreach (Airbase.Runway runway in clone.runways ?? new Airbase.Runway[0])
+            {
+                if (runway == null) continue;
+                runway.AllowSimultaneousTakeoff = false;
+                set++;
+            }
+
+            log.Add($"airbase '{placement.UniqueName}': one aircraft at a time on its runways ({set} runway object(s))");
         }
 
         /// <summary>What an airbase built here was given for a taxi network, and whether the map carried
@@ -1052,6 +1084,184 @@ namespace CustomMaps
         }
 
         /// <summary>
+        /// Gives the clone a take-off-only runway for each of the field's take-off starts, after all its
+        /// other runways, in the order the map gives them: the order is the runways' indices, the byte the
+        /// landing RPC carries, so server and client build the same array from the same bundle.
+        ///
+        /// Built as the base game builds the one it has, read from Ignus' <c>airbase_NW</c>
+        /// (sharedassets1, 2026-10-21): <c>runway14LTakeoffShort</c>, named "Runway14L Short", lies on
+        /// runway 14L's strip, its <c>Start</c> where a taxiway joins 198 m inside 14L's start and its
+        /// <c>End</c> 14L's own end transform, with <c>Takeoff</c> on, <c>Landing</c> and <c>Reversable</c>
+        /// off, <c>AllowSimultaneousTakeoff</c> on, 14L's 40 m width, no rigidbody and no lights. Its one
+        /// entry point is a transform beside the taxiway and its one exit is 14L's first exit, which
+        /// nothing reads for a runway that takes no landings (<c>TryGetExitTaxiPoint</c> is asked only of
+        /// a landing runway, after <c>AircraftIsOnRunway(landingRunwaysOnly: true)</c>); here both are
+        /// empty arrays, which every loop over them in the game takes as nothing.
+        ///
+        /// What that does: <c>Airbase.GetTakeoffRunway</c> sends an aircraft to the nearest start of any
+        /// runway that takes take-offs, and the end too of a reversible one, so an aircraft nearer the
+        /// take-off start than any runway end taxis to it, the way the taxiway leads, and lines up there
+        /// facing down the runway, instead of taxiing back to the end and turning round. Nothing else
+        /// sees it: the landing runway is chosen among <c>Landing</c> runways alone
+        /// (<c>RequestLanding</c>, <c>GetLandingRunway</c>, <c>IsSuitable</c> for a landing query,
+        /// <c>AircraftIsOnRunway</c> for exits, the HUD's outline and glideslope, which follow the landing
+        /// runway, and <see cref="AITerrain"/>'s choice of landing end), the clone draws nothing, and the
+        /// paint ships in the bundle. Its thresholds both face down the take-off, so an outline drawn for
+        /// it would be a rectangle, not an X (<see cref="ExtraRunway"/>).
+        ///
+        /// It is left unnamed, so the cockpit's "Cleared to taxi to" names it by its direction as the
+        /// runway it lies on is named that way ("Runway 29"). Two runways on one strip are linked by
+        /// <see cref="Patches.TakeoffStripPatch"/>, so that neither clears a take-off while the other has a
+        /// landing or a take-off under way.
+        ///
+        /// A runway given at least one take-off start then takes off only from its starts: its own
+        /// <c>Takeoff</c> is switched off (<see cref="UseTakeoffStarts"/>), so its ends are no take-off
+        /// points any more, while it keeps its landings, exits and everything else. Starts left out here
+        /// do not count, so a runway whose starts were all left out keeps its ends. A start on a runway
+        /// that takes no take-offs is left out, so that a runway whose starts are all switched off later
+        /// (<see cref="MissionAirbaseRoads"/>) can always be given its ends back.
+        /// </summary>
+        /// <returns>A line for the log: what was built and what was left out, and why.</returns>
+        static string LayOutTakeoffStarts(Airbase clone, AirbasePlacement placement, TaxiPlan plan, int[] runwayOf)
+        {
+            Transform frame = clone.transform.parent;
+            var runways = new List<Airbase.Runway>(clone.runways ?? new Airbase.Runway[0]);
+            var built = new List<string>();
+            var dropped = new List<string>(plan.DroppedTakeoffs);
+
+            for (int k = 0; k < plan.Takeoffs.Count; k++)
+            {
+                PlannedTakeoff takeoff = plan.Takeoffs[k];
+                int index = takeoff.Runway < runwayOf.Length ? runwayOf[takeoff.Runway] : -1;
+                Airbase.Runway runway = index >= 0 && index < runways.Count ? runways[index] : null;
+                if (runway?.Start == null || runway.End == null)
+                {
+                    dropped.Add($"take-off start on runway {takeoff.Runway + 1}, which the airbase was built without");
+                    continue;
+                }
+
+                if (!runway.Takeoff)
+                {
+                    dropped.Add($"take-off start on runway {takeoff.Runway + 1}, which takes no take-offs");
+                    continue;
+                }
+
+                var start = new Vector3(takeoff.StartX, placement.Y, takeoff.StartZ);
+                var end = new Vector3(takeoff.EndX, placement.Y, takeoff.EndZ);
+                Vector3 along = frame != null ? frame.TransformDirection(end - start) : end - start;
+
+                Transform Point(string label, Vector3 mapPosition)
+                {
+                    var point = new GameObject($"Runway {index + 1} take-off start {k + 1} {label}").transform;
+                    point.SetParent(clone.transform, worldPositionStays: false);
+                    point.position = Local(frame, mapPosition);
+                    point.rotation = Quaternion.LookRotation(along, Vector3.up);
+                    return point;
+                }
+
+                var takeoffRunway = new Airbase.Runway
+                {
+                    Start = Point("start", start),
+                    End = Point("end", end),
+                    Reversable = false,
+                    Takeoff = true,
+                    Landing = false,
+                    AllowSimultaneousTakeoff = runway.AllowSimultaneousTakeoff,
+                    Arrestor = false,
+                    SkiJump = false,
+                    entryPoints = new Transform[0],
+                    exitPoints = new Transform[0],
+                };
+                takeoffRunway.width = runway.GetWidth();
+                takeoffRunway.name = "";
+
+                runways.Add(takeoffRunway);
+                (string number, _) = RunwayDesignator.Ends(takeoff.StartX, takeoff.StartZ, takeoff.EndX, takeoff.EndZ);
+                built.Add($"runway {runways.Count} on runway {index + 1}, taking off on {number} with {takeoff.Run:N0} m ahead" +
+                          (takeoff.Moved > 0.5f ? $" (moved {takeoff.Moved:N0} m onto the centreline)" : ""));
+            }
+
+            clone.runways = runways.ToArray();
+
+            // The runways the starts lie on take off from them alone, found as every later reader finds
+            // them, by where they lie (TaxiPlans.TakeoffParents): a start that is not found so is linked to
+            // nothing at run time either, so its runway keeps its ends.
+            int[] parents = TakeoffParents(clone.runways);
+            int found = 0;
+            foreach (int parent in parents) if (parent >= 0) found++;
+            if (found != built.Count)
+                Plugin.LogWarning($"airbase '{placement.UniqueName}': {built.Count - found} of its {built.Count} take-off start(s) " +
+                                  "do not lie on their runway's centreline and end, so the runway they were placed on still " +
+                                  "takes off from its own ends as well. Export the airfields again in Map Forge");
+            UseTakeoffStarts(clone.runways, parents, null);
+
+            var startsOnly = new List<string>();
+            bool?[] flags = TaxiPlans.TakeoffFlags(parents);
+            for (int i = 0; i < flags.Length; i++)
+                if (flags[i] == false && clone.runways[i].Landing) startsOnly.Add((i + 1).ToString());
+
+            string line = $"{placement.UniqueName}: {built.Count} take-off start(s)" +
+                          (built.Count > 0 ? ": " + string.Join("; ", built) : "") +
+                          (startsOnly.Count > 0 ? $"; runway(s) {string.Join(", ", startsOnly)} take off from their starts only" : "");
+            if (dropped.Count > 0)
+            {
+                Plugin.LogWarning($"airbase '{placement.UniqueName}': {dropped.Count} take-off start(s) left out: " +
+                                  string.Join("; ", dropped) + ". Move them onto the runway in Map Forge (Lanes, Take-off) " +
+                                  "and export the airfields again");
+                line += $"; {dropped.Count} left out";
+            }
+
+            return line;
+        }
+
+        /// <summary>
+        /// For each of an airbase's runways, the runway it is a take-off start of, or -1
+        /// (<see cref="TaxiPlans.TakeoffParents"/>), by where its thresholds lie.
+        /// </summary>
+        internal static int[] TakeoffParents(Airbase.Runway[] runways)
+        {
+            runways = runways ?? new Airbase.Runway[0];
+            var lines = new List<RunwayLine>(runways.Length);
+            foreach (Airbase.Runway runway in runways)
+            {
+                if (runway?.Start == null || runway.End == null)
+                {
+                    // Nowhere: lies on nothing, and keeps the others' indices where they are.
+                    lines.Add(new RunwayLine { StartX = float.NaN, StartZ = float.NaN, EndX = float.NaN, EndZ = float.NaN, Landing = true });
+                    continue;
+                }
+
+                Vector3 start = runway.Start.position, end = runway.End.position;
+                lines.Add(new RunwayLine { StartX = start.x, StartZ = start.z, EndX = end.x, EndZ = end.z, Landing = runway.Landing });
+            }
+
+            return TaxiPlans.TakeoffParents(lines);
+        }
+
+        /// <summary>
+        /// Sets each runway's <c>Takeoff</c> as <see cref="TaxiPlans.TakeoffFlags"/> has it for the take-off
+        /// starts in use (<paramref name="inUse"/>, null for all of them): a runway with a start in use
+        /// takes off from its starts only, one whose starts are all out of use from its own ends again,
+        /// and each start while it is in use. Runways without starts are left as they are.
+        /// </summary>
+        /// <returns>The runways with starts that take off from their own ends, by index.</returns>
+        internal static List<int> UseTakeoffStarts(Airbase.Runway[] runways, int[] parents, IReadOnlyList<bool> inUse)
+        {
+            var ends = new List<int>();
+            if (runways == null) return ends;
+
+            bool?[] flags = TaxiPlans.TakeoffFlags(parents, inUse);
+            for (int i = 0; i < runways.Length && i < flags.Length; i++)
+            {
+                if (runways[i] == null || flags[i] == null) continue;
+                runways[i].Takeoff = flags[i].Value;
+                if (parents[i] < 0 && flags[i].Value) ends.Add(i);
+            }
+
+            return ends;
+        }
+
+        /// <summary>
         /// The clone's runways for the log: how many, and each one's length, width and bearing.
         ///
         /// It also warns about any runway whose thresholds are not turned the same way. The HUD's
@@ -1062,6 +1272,9 @@ namespace CustomMaps
         static string DescribeRunways(Airbase clone)
         {
             Airbase.Runway[] runways = clone.runways ?? new Airbase.Runway[0];
+            int[] parents = TakeoffParents(runways);
+            var hasStarts = new bool[runways.Length];
+            foreach (int parent in parents) if (parent >= 0 && parent < hasStarts.Length) hasStarts[parent] = true;
 
             var parts = new List<string>();
             for (int i = 0; i < runways.Length; i++)
@@ -1071,7 +1284,10 @@ namespace CustomMaps
 
                 Vector3 along = runway.End.position - runway.Start.position;
                 float bearing = (Mathf.Atan2(along.x, along.z) * Mathf.Rad2Deg + 360f) % 360f;
-                parts.Add($"{along.magnitude:N0} x {runway.GetWidth():N0} m on {bearing:0}deg");
+                parts.Add($"{along.magnitude:N0} x {runway.GetWidth():N0} m on {bearing:0}deg" +
+                          (!runway.Landing ? " (take-off only)"
+                           : !runway.Takeoff && hasStarts[i] ? " (take-off from its starts only)"
+                           : ""));
 
                 if (Vector3.Dot(runway.Start.right, runway.End.right) <= 0f)
                     Plugin.LogWarning($"airbase '{clone.name}': runway {i + 1} ({bearing:0}deg) has thresholds " +

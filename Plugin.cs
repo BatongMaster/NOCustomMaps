@@ -26,7 +26,7 @@ namespace CustomMaps
     public sealed class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.javoski.custommaps";
-        public const string Version = "1.4.0";
+        public const string Version = "1.4.1";
 
         internal static Plugin Instance { get; private set; }
         static ManualLogSource _log;
@@ -310,7 +310,7 @@ namespace CustomMaps
 
             // Degradations, not failures.
             Method(typeof(MapLoader), nameof(MapLoader.TryGetMapName), critical: false);
-            Method(typeof(MissionsPicker), nameof(MissionsPicker.SelectMission), critical: false);
+            Method(typeof(MissionPicker), nameof(MissionPicker.SelectMission), critical: false);
             Method(typeof(NuclearOption.MissionEditorScripts.MissionEditorLoadMenuV2),
                    nameof(NuclearOption.MissionEditorScripts.MissionEditorLoadMenuV2.SelectMission), critical: false);
             Method(typeof(NuclearOption.MissionEditorScripts.MissionEditor),
@@ -379,6 +379,21 @@ namespace CustomMaps
             Field(typeof(AIHeloTakeoffState), "rotorShaft", critical: false);
             Field(typeof(AIPilotLandingState), "reachedFinal", critical: false);
             Field(typeof(AircraftParameters), "minimumRadarAlt", critical: false);
+
+            // A runway and its take-off starts sharing their strip's traffic (TakeoffStripPatch).
+            Method(typeof(Airbase.Runway), nameof(Airbase.Runway.FindCrossingRunways), critical: false, System.Type.EmptyTypes);
+            Field(typeof(Airbase.Runway), "crossingRunways", critical: false);
+
+            // One aircraft at a time on a custom map's runway strip (RunwayLockPatches).
+            Method(typeof(Airbase.Runway), nameof(Airbase.Runway.OtherAircraftUsingRunway), critical: false, new[] { typeof(Aircraft) });
+            Method(typeof(Airbase.Runway), nameof(Airbase.Runway.IsAvailableForTakeoff), critical: false, new[] { typeof(Aircraft) });
+            Field(typeof(Airbase.Runway), "takeoffQueue", critical: false);
+            Field(typeof(Airbase.Runway), "landingList", critical: false);
+            Method(typeof(AIPilotLandingState), "StabilizedApproach", critical: false);
+            Method(typeof(AIPilotLandingState), "SwitchMode", critical: false);
+            Field(typeof(AIPilotLandingState), "landingMode", critical: false);
+            Field(typeof(AIPilotLandingState), "requestedLanding", critical: false);
+            Field(typeof(AIPilotLandingState), "runwayUsage", critical: false);
 
             return ok;
         }
@@ -504,6 +519,25 @@ namespace CustomMaps
             Patch(harmony, typeof(Patches.TiltrotorPlanPatch), critical: false);
             Patch(harmony, typeof(Patches.TiltrotorBoresightPatch), critical: false);
             Patch(harmony, typeof(Patches.HelicopterTakeoffPatch), critical: false);
+
+            // A runway and the take-off starts on it share their strip's traffic, as runways that cross do:
+            // neither clears a take-off while the other has a landing or a take-off under way. Without it each
+            // is cleared on its own queue alone. Skips itself (Prepare) when the game's runway has no
+            // crossingRunways list to add to.
+            Patch(harmony, typeof(Patches.TakeoffStripPatch), critical: false);
+
+            // One aircraft at a time on a custom map's runway strip, taking off or landing (RunwayLock), on
+            // the airbases its map maker set so: a take-off holds the strip from its clearance until it is
+            // off the ground (the plugin builds their runways with AllowSimultaneousTakeoff off,
+            // AirbaseBuilder), aircraft gone or done with a runway stop holding it, the head of a queue waits
+            // while the strip has a landing or a take-off on another piece of it, and an AI near touchdown
+            // goes around while an aircraft takes off on its strip. Without them a take-off still holds its
+            // strip there, but whatever crashed on it holds it too and landings are not held. Every other
+            // airbase is left as the game has it. Each skips itself (Prepare) when the game's queue or
+            // approach is not the one it was checked against.
+            Patch(harmony, typeof(Patches.RunwayInUsePatch), critical: false);
+            Patch(harmony, typeof(Patches.TakeoffClearancePatch), critical: false);
+            Patch(harmony, typeof(Patches.LandingGoAroundPatch), critical: false);
 
             if (!ok)
                 LogError("a critical patch could not be applied, so no maps will be registered. " +

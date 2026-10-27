@@ -35,6 +35,35 @@ namespace CustomMaps
     }
 
     /// <summary>
+    /// A take-off start: a point on a runway's centreline where a taxiway enters it, and which way
+    /// along the runway an aircraft that lines up there takes off. AI pathing only: nothing is drawn
+    /// for it, on the ground or anywhere else.
+    ///
+    /// The game sends an aircraft to take off at a runway's threshold (<c>Airbase.GetTakeoffRunway</c>:
+    /// the nearest start of any runway that takes take-offs, its end too when it is reversible), and
+    /// taxis it there along the taxi network. A taxiway that joins a runway inside its end has it turn
+    /// away from its take-off, taxi back to the end and turn round there. The base game avoids that with
+    /// a second runway on the same strip (Ignus' <c>runway14LTakeoffShort</c>: its start where a taxiway
+    /// joins 200 m inside the end, its end the runway's own, take-offs only, never landings), and the
+    /// plugin builds one such runway for each take-off start, invisible.
+    /// </summary>
+    public struct TaxiTakeoff
+    {
+        /// <summary>Which runway of the airbase, numbered as <see cref="TaxiExit.Runway"/>: 0 the main
+        /// one, then its extra runways in order from 1.</summary>
+        public int Runway;
+
+        /// <summary>Where on the centreline, in map metres.</summary>
+        public float X, Z;
+
+        /// <summary><see cref="TaxiExit.Forward"/> to take off towards the runway's end (from its start
+        /// towards its end), <see cref="TaxiExit.Reverse"/> towards its start. Exactly one of the two.</summary>
+        public byte Direction;
+
+        public bool TowardsEnd => Direction == TaxiExit.Forward;
+    }
+
+    /// <summary>
     /// What an airbase's taxi network was made from, for the log and the map's check report. It
     /// changes nothing in how the airbase is built or its AI treated: every network is made by the
     /// same rules, and a drawn field's AI is let onto its grass whatever the source, since none of
@@ -90,7 +119,22 @@ namespace CustomMaps
         /// donor airbase's.</summary>
         public (float X, float Z)? LandingPad;
 
+        /// <summary>The field's take-off starts, placed by hand in Map Forge; empty for none, as every
+        /// field had before them.</summary>
+        public List<TaxiTakeoff> Takeoffs = new List<TaxiTakeoff>();
+
+        /// <summary>
+        /// One aircraft at a time on each of the field's runways, set per airbase in Map Forge, off by
+        /// default: a take-off holds its runway, with every take-off start on it, from its clearance until
+        /// it is off the ground, and the AI's landings and take-offs wait for each other on it. Off, the
+        /// field's runways are shared as the game shares them, which clears the next take-off as soon as
+        /// the one ahead lines up.
+        /// </summary>
+        public bool OneAircraftPerRunway;
+
         public bool HasNetwork => Roads != null && Roads.Count > 0;
+
+        public bool HasTakeoffs => Takeoffs != null && Takeoffs.Count > 0;
     }
 
     /// <summary>
@@ -109,11 +153,50 @@ namespace CustomMaps
     ///             exit count (int), per exit the runway (byte, 0 the main one), directions (byte,
     ///             <see cref="TaxiExit.Forward"/> | <see cref="TaxiExit.Reverse"/>), x, z (floats)
     ///             flags (byte: 1 a service point follows, 2 a landing pad follows), then their x, z
+    ///
+    ///   and, only when some field has take-off starts, after the last airbase:
+    ///   NOTKOF01  per airbase, in the same order: take-off count (int), per take-off start the runway
+    ///             (byte, as an exit's), direction (byte, <see cref="TaxiExit.Forward"/> towards the
+    ///             runway's end or <see cref="TaxiExit.Reverse"/> towards its start), x, z (floats)
+    ///
+    ///   and, only when some field has one aircraft per runway, after that (or after the last airbase
+    ///   when no field has take-off starts):
+    ///   NORWLK01  per airbase, in the same order: runway flags (byte, 1 one aircraft per runway,
+    ///             <see cref="TaxiNetworkData.OneAircraftPerRunway"/>; other bits are later additions,
+    ///             ignored)
+    ///
+    /// The take-off starts follow everything else, under a tag of their own, rather than making a
+    /// NOTAXI02, because a plugin reads this file only as far as its last airbase and stops there:
+    /// one from before them (1.4.0 and earlier) reads the networks as it always did and never sees
+    /// the starts, where a new magic would have it refuse the file and give every field the default
+    /// network. A file with no take-off starts is byte for byte what it was before them. A reader that
+    /// meets a tag it does not know after the airbases leaves it alone, for the same reason.
+    ///
+    /// The runway flags follow in a section of their own for the same reason. A plugin that reads the
+    /// take-off starts (1.4.1) stops after them, or, finding the flags' tag where it looks for the
+    /// starts', takes it as a later addition and leaves it; one from before the starts never gets that
+    /// far. Either builds every field sharing its runways as the game does. A file with every field's
+    /// flag off is byte for byte what it was before the flag.
     /// </summary>
     public static class TaxiData
     {
         public static readonly byte[] Magic =
             { (byte)'N', (byte)'O', (byte)'T', (byte)'A', (byte)'X', (byte)'I', (byte)'0', (byte)'1' };
+
+        /// <summary>The tag of the take-off starts' section, after the last airbase.</summary>
+        public static readonly byte[] TakeoffMagic =
+            { (byte)'N', (byte)'O', (byte)'T', (byte)'K', (byte)'O', (byte)'F', (byte)'0', (byte)'1' };
+
+        /// <summary>The tag of the runway flags' section, after the take-off starts' when there are any,
+        /// otherwise after the last airbase.</summary>
+        public static readonly byte[] RunwayLockMagic =
+            { (byte)'N', (byte)'O', (byte)'R', (byte)'W', (byte)'L', (byte)'K', (byte)'0', (byte)'1' };
+
+        /// <summary>A field's runway flag: one aircraft at a time on each runway.</summary>
+        public const byte OneAircraftPerRunwayFlag = 1;
+
+        /// <summary>Most take-off starts an airbase may have: one for every way onto every runway.</summary>
+        public const int MaxTakeoffs = 64;
 
         /// <summary>Sanity bounds on a corrupt or hostile file. A base-game airbase has at most 80
         /// roads, 380 points and 20 points a road.</summary>
@@ -184,6 +267,42 @@ namespace CustomMaps
                         writer.Write(airbase.LandingPad.Value.Z);
                     }
                 }
+
+                // The take-off starts, after everything a reader from before them reads; nothing at all
+                // when no field has one, so such a file is exactly what it always was.
+                bool takeoffs = false;
+                foreach (TaxiNetworkData airbase in airbases)
+                    takeoffs |= airbase.HasTakeoffs;
+
+                if (takeoffs)
+                {
+                    writer.Write(TakeoffMagic);
+                    foreach (TaxiNetworkData airbase in airbases)
+                    {
+                        List<TaxiTakeoff> starts = airbase.Takeoffs ?? new List<TaxiTakeoff>();
+                        writer.Write(starts.Count);
+                        foreach (TaxiTakeoff start in starts)
+                        {
+                            writer.Write((byte)start.Runway);
+                            writer.Write(start.Direction);
+                            writer.Write(start.X);
+                            writer.Write(start.Z);
+                        }
+                    }
+                }
+
+                // The runway flags, after everything a reader from before them reads; nothing at all when
+                // every field shares its runways as the game does, so such a file is what it always was.
+                bool locks = false;
+                foreach (TaxiNetworkData airbase in airbases)
+                    locks |= airbase.OneAircraftPerRunway;
+
+                if (locks)
+                {
+                    writer.Write(RunwayLockMagic);
+                    foreach (TaxiNetworkData airbase in airbases)
+                        writer.Write(airbase.OneAircraftPerRunway ? OneAircraftPerRunwayFlag : (byte)0);
+                }
             }
         }
 
@@ -236,8 +355,26 @@ namespace CustomMaps
                     throw new ArgumentException($"airbase '{name}' has its service point at no place on the map");
                 if (airbase.LandingPad.HasValue && !(Finite(airbase.LandingPad.Value.X) && Finite(airbase.LandingPad.Value.Z)))
                     throw new ArgumentException($"airbase '{name}' has its landing pad at no place on the map");
+
+                int takeoffs = airbase.Takeoffs?.Count ?? 0;
+                if (takeoffs > MaxTakeoffs)
+                    throw new ArgumentException($"airbase '{name}' has {takeoffs} take-off starts; at most {MaxTakeoffs}");
+
+                if (airbase.Takeoffs != null)
+                    foreach (TaxiTakeoff start in airbase.Takeoffs)
+                    {
+                        if (start.Runway < 0 || start.Runway > AirbaseData.MaxExtraRunways)
+                            throw new ArgumentException($"airbase '{name}' has a take-off start on runway {start.Runway}");
+                        if (!KnownDirection(start.Direction))
+                            throw new ArgumentException($"airbase '{name}' has a take-off start with direction {start.Direction}");
+                        if (!Finite(start.X) || !Finite(start.Z))
+                            throw new ArgumentException($"airbase '{name}' has a take-off start at no place on the map");
+                    }
             }
         }
+
+        /// <summary>A take-off goes one way: towards the runway's end or towards its start.</summary>
+        static bool KnownDirection(byte direction) => direction == TaxiExit.Forward || direction == TaxiExit.Reverse;
 
         public static List<TaxiNetworkData> Read(byte[] bytes)
         {
@@ -325,7 +462,66 @@ namespace CustomMaps
                     airbases.Add(airbase);
                 }
 
+                ReadSections(reader, airbases);
                 return airbases;
+            }
+        }
+
+        /// <summary>
+        /// The sections after the last airbase, in the order they are written: the take-off starts', then
+        /// the runway flags', each only when the file has it. Nothing there is a file without either; a tag
+        /// this build does not know is a later addition, left alone with everything after it as a reader
+        /// from before the starts leaves them alone, so the networks are still used.
+        /// </summary>
+        static void ReadSections(BinaryReader reader, List<TaxiNetworkData> airbases)
+        {
+            byte[] tag = reader.ReadBytes(TakeoffMagic.Length);
+            if (tag.Length == TakeoffMagic.Length && SameBytes(tag, TakeoffMagic, TakeoffMagic.Length))
+            {
+                ReadTakeoffs(reader, airbases);
+                tag = reader.ReadBytes(RunwayLockMagic.Length);
+            }
+
+            if (tag.Length == RunwayLockMagic.Length && SameBytes(tag, RunwayLockMagic, RunwayLockMagic.Length))
+                ReadRunwayLocks(reader, airbases);
+        }
+
+        /// <summary>The runway flags' section, its tag read: a byte per airbase, of which this build knows
+        /// one bit.</summary>
+        static void ReadRunwayLocks(BinaryReader reader, List<TaxiNetworkData> airbases)
+        {
+            for (int i = 0; i < airbases.Count; i++)
+            {
+                byte[] flags = reader.ReadBytes(1);
+                if (flags.Length < 1) throw new InvalidDataException($"taxi airbase {i}'s runway flags are truncated");
+                airbases[i].OneAircraftPerRunway = (flags[0] & OneAircraftPerRunwayFlag) != 0;
+            }
+        }
+
+        /// <summary>The take-off starts' section, its tag read.</summary>
+        static void ReadTakeoffs(BinaryReader reader, List<TaxiNetworkData> airbases)
+        {
+            for (int i = 0; i < airbases.Count; i++)
+            {
+                int count = reader.ReadInt32();
+                if (count < 0 || count > MaxTakeoffs)
+                    throw new InvalidDataException($"taxi airbase {i} claims {count} take-off starts");
+
+                for (int t = 0; t < count; t++)
+                {
+                    var start = new TaxiTakeoff { Runway = reader.ReadByte(), Direction = reader.ReadByte() };
+                    if (start.Runway > AirbaseData.MaxExtraRunways)
+                        throw new InvalidDataException($"taxi airbase {i} has a take-off start on runway {start.Runway}");
+                    if (!KnownDirection(start.Direction))
+                        throw new InvalidDataException($"taxi airbase {i} has a take-off start with direction {start.Direction}");
+
+                    start.X = reader.ReadSingle();
+                    start.Z = reader.ReadSingle();
+                    if (!Finite(start.X) || !Finite(start.Z))
+                        throw new InvalidDataException($"taxi airbase {i} has a take-off start at no place");
+
+                    airbases[i].Takeoffs.Add(start);
+                }
             }
         }
 

@@ -340,7 +340,8 @@ namespace CustomMaps
                     .Append($"{saved?.UniqueName,-6} {saved?.faction,-8} ")
                     .Append($"({at.x,8:N0}, {at.z,8:N0}) at {at.y,5:N0} m, ")
                     .Append($"{airbase.runways?.Length ?? 0} runway(s), {length,5:N0} m")
-                    .Append(ExtraRunwayLengths(airbase, runway))
+                    .Append(ExtraRunwayLengths(airbase, runway, out int takeoffs))
+                    .Append(takeoffs > 0 ? $" and {takeoffs} take-off start(s)" : "")
                     .Append($", capture {saved?.CaptureRange ?? 0f:N0} m")
                     .Append(DescribeTaxiNetwork(airbase));
             }
@@ -438,12 +439,21 @@ namespace CustomMaps
 
         /// <summary>The lengths of the runways after the main one, as " + 1,200 + 900 m", or empty
         /// for a field with one.</summary>
-        static string ExtraRunwayLengths(Airbase airbase, Airbase.Runway main)
+        static string ExtraRunwayLengths(Airbase airbase, Airbase.Runway main, out int takeoffs)
         {
             var lengths = new List<string>();
+            takeoffs = 0;
             foreach (Airbase.Runway other in airbase.runways ?? Array.Empty<Airbase.Runway>())
             {
                 if (other == null || other == main) continue;
+
+                // A take-off start (AirbaseBuilder.LayOutTakeoffStarts) is counted, not listed: it is a
+                // runway the game takes off from, but no strip of its own.
+                if (!other.Landing && !other.Reversable)
+                {
+                    takeoffs++;
+                    continue;
+                }
 
                 lengths.Add(other.Start != null && other.End != null
                     ? Vector3.Distance(other.Start.position, other.End.position).ToString("N0")

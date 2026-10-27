@@ -186,10 +186,12 @@ namespace CustomMaps
             map.Made.Clear();
 
             Airbase.Runway[] runways = airbase.runways ?? new Airbase.Runway[0];
+            int[] takeoffOf = TakeoffParents(runways);
             if (network == map.Network)
             {
                 for (int i = 0; i < runways.Length && i < map.Exits.Length; i++)
                     if (runways[i] != null && map.Exits[i] != null) runways[i].exitPoints = map.Exits[i];
+                UseTakeoffs(airbase, runways, takeoffOf, null);
                 return;
             }
 
@@ -206,6 +208,9 @@ namespace CustomMaps
             {
                 Airbase.Runway runway = runways[i];
                 if (runway?.Start == null || runway.End == null) continue;
+
+                // A take-off start takes no landings, so it has no exits to make (AirbaseBuilder).
+                if (takeoffOf[i] >= 0) continue;
 
                 GlobalPosition start = runway.Start.GlobalPosition(), end = runway.End.GlobalPosition();
                 List<PlannedExit> exits = MissionTaxiRoads.Exits(roads, (start.x, start.z), (end.x, end.z), runway.GetWidth());
@@ -224,6 +229,67 @@ namespace CustomMaps
 
                 runway.exitPoints = points;
             }
+
+            UseTakeoffs(airbase, runways, takeoffOf, roads);
+        }
+
+        /// <summary>For each of an airbase's runways, the runway it is a take-off start of, or -1
+        /// (<see cref="TaxiPlans.TakeoffParents"/>), by where its thresholds lie.</summary>
+        static int[] TakeoffParents(Airbase.Runway[] runways)
+        {
+            var lines = new List<RunwayLine>(runways.Length);
+            foreach (Airbase.Runway runway in runways)
+            {
+                if (runway?.Start == null || runway.End == null)
+                {
+                    lines.Add(new RunwayLine { StartX = float.NaN, StartZ = float.NaN, EndX = float.NaN, EndZ = float.NaN, Landing = true });
+                    continue;
+                }
+
+                GlobalPosition start = runway.Start.GlobalPosition(), end = runway.End.GlobalPosition();
+                lines.Add(new RunwayLine { StartX = start.x, StartZ = start.z, EndX = end.x, EndZ = end.z, Landing = runway.Landing });
+            }
+
+            return TaxiPlans.TakeoffParents(lines);
+        }
+
+        /// <summary>
+        /// The take-off starts the map placed (<see cref="AirbaseBuilder"/>), for the network in use: with
+        /// the map's own, every one takes take-offs, as built; with a mission's (<paramref name="roads"/>),
+        /// only those the mission's roads lead to (<see cref="MissionTaxiRoads.Reaches"/>). One they do not
+        /// would have the game route an aircraft to the mission's junction nearest it and drive it straight
+        /// on, to line up where the map's lanes meet the runway; switched off, that aircraft goes elsewhere.
+        /// A mission that draws its own lane to where the map's met keeps the start.
+        ///
+        /// A runway with starts takes off only from them (<see cref="TaxiPlans.TakeoffFlags"/>): its own ends
+        /// stay switched off while any of its starts is in use, and come back on when none is, so a runway
+        /// whose starts the mission's roads all miss takes off from its ends, as on any airbase, and never
+        /// loses all its take-offs; with the map's roads back, it is starts only again.
+        /// </summary>
+        static void UseTakeoffs(Airbase airbase, Airbase.Runway[] runways, int[] takeoffOf, List<(float X, float Z)[]> roads)
+        {
+            int off = 0, starts = 0;
+            var inUse = new bool[runways.Length];
+            for (int i = 0; i < runways.Length && i < takeoffOf.Length; i++)
+            {
+                if (takeoffOf[i] < 0) continue;
+                starts++;
+
+                GlobalPosition at = runways[i].Start.GlobalPosition();
+                inUse[i] = roads == null || MissionTaxiRoads.Reaches(roads, (at.x, at.z));
+                if (!inUse[i]) off++;
+            }
+
+            if (starts == 0) return;
+
+            List<int> ends = AirbaseBuilder.UseTakeoffStarts(runways, takeoffOf, inUse);
+
+            if (off > 0)
+                Plugin.LogDebug($"airbase '{airbase.name}': {off} of its {starts} take-off start(s) switched off while the " +
+                                "mission's taxi roads are in use, which lead to none of them" +
+                                (ends.Count > 0
+                                    ? $"; runway(s) {string.Join(", ", ends.ConvertAll(i => (i + 1).ToString()))} take off from their own ends there"
+                                    : "; the runways they lie on take off from their other starts"));
         }
 
         /// <summary>A warning for the log when a mission's roads lie far from the airbase: made for a

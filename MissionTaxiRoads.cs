@@ -168,6 +168,41 @@ namespace CustomMaps
             return pieces;
         }
 
+        /// <summary>Metres from a take-off start within which a mission's roads count as reaching it: Map
+        /// Forge's own reach for a runway end a road is at (<c>TaxiGraphConfig.ThresholdReach</c>).</summary>
+        public const float TakeoffReach = 30f;
+
+        /// <summary>
+        /// Whether a network's roads come within <paramref name="reach"/> of a point: whether a mission's
+        /// own roads lead to a take-off start the map placed for its own. One they do not lead to is
+        /// switched off while the mission's roads are in use (<see cref="MissionAirbaseRoads"/>): the game
+        /// would route an aircraft to the junction nearest it and drive it straight on from there, over
+        /// whatever the mission put in the way, to line up where the map's lanes, not the mission's, meet
+        /// the runway. Measured to each road's points and the straights between them.
+        /// </summary>
+        public static bool Reaches(IReadOnlyList<(float X, float Z)[]> roads, (float X, float Z) point, float reach = TakeoffReach)
+        {
+            if (roads == null) return false;
+
+            foreach ((float X, float Z)[] road in roads)
+            {
+                if (road == null || road.Length == 0) continue;
+                if (Distance(road[0], point) <= reach) return true;
+
+                for (int i = 1; i < road.Length; i++)
+                {
+                    (float X, float Z) a = road[i - 1], b = road[i];
+                    double dx = b.X - a.X, dz = b.Z - a.Z, lengthSquared = dx * dx + dz * dz;
+                    double t = lengthSquared < 1e-9 ? 0.0
+                             : Math.Max(0.0, Math.Min(1.0, ((point.X - a.X) * dx + (point.Z - a.Z) * dz) / lengthSquared));
+                    double x = a.X + dx * t - point.X, z = a.Z + dz * t - point.Z;
+                    if (Math.Sqrt(x * x + z * z) <= reach) return true;
+                }
+            }
+
+            return false;
+        }
+
         /// <summary>Whether a segment crosses the centreline strictly inside both, and how far along
         /// the centreline as a share of it.</summary>
         static bool Crosses((float X, float Z) a, (float X, float Z) b, (float X, float Z) c, (float X, float Z) d, out double u)
