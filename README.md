@@ -50,10 +50,6 @@ one, then **Create New** or **Create Default**: the mission is made on that map,
 `cm.<mapId>.<hash8>`. Two maps with the same name show their version (or map id) on the tile. A map that
 failed to load this session is greyed out and marked "(failed to load)".
 
-An airbase's panel has a **Service Points** list, where AI aircraft taxi to after landing. It starts with
-the map's, shown on the map. Move, add or remove one and the mission uses its own list instead; remove them
-all to go back to the map's. In a mission file they are the airbase's `ServicePoints`, and none means the map's.
-
 ## Multiplayer
 
 The server and every player need the same build of the map, as its `.nomap` or its `.nomapz`, and
