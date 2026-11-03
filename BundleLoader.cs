@@ -1,3 +1,4 @@
+using NuclearOption.SavedMission;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -235,7 +236,8 @@ namespace CustomMaps
         ///
         /// Reading it registers the maps first if their hashes are still being worked out, waiting for
         /// them on this thread. Everything that reads it runs on the main thread, from the game's own
-        /// map lookups onwards; nothing in the game asks before a mission or lobby is on its way.
+        /// map lookups onwards; nothing in the game asks before a mission, a lobby or the mission list is
+        /// on its way.
         /// </summary>
         public static IReadOnlyList<LoadedMap> Maps
         {
@@ -710,6 +712,14 @@ namespace CustomMaps
             map.Details = ScriptableObject.CreateInstance<MapDetails>();
             map.Details.PrefabName = map.Manifest.PrefabNameFor(map.ContentHash);
             map.Details.MapName = map.Manifest.DisplayName;
+            // The tag a mission uploaded to the workshop is given for its map, and the one the mission
+            // picker files its missions under; without one the game refuses to upload any mission made on
+            // this map. See WorkshopTags.
+            map.Details.WorkshopTag = WorkshopTags.MapTag(map.Manifest.DisplayName);
+            string mapId = MapIdentity.IdOf(map.Details.PrefabName);
+            map.Details.TagColor = WorkshopTags.TryTagColor(map.Manifest.TagColor, mapId, out byte red, out byte green, out byte blue)
+                ? new Color32(red, green, blue, 255)
+                : Color.HSVToRGB(WorkshopTags.TagHue(mapId), MissionTag.SATURATION, MissionTag.BRIGHTNESS);
             // No MapImage here. In the game it is read by one thing, the New Mission panel's map tile
             // (NewMissionMapButton.SetMap); the tactical map reads MapSettings.MapImage, which MapFixups sets
             // when the map is prepared. It used to be the map's chart, read whole on the main thread at every

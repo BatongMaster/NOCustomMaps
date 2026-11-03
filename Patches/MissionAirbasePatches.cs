@@ -38,6 +38,7 @@ namespace CustomMaps.Patches
 
             // The roads apart from the flag, so that either failing leaves the other working.
             TryRoads(() => MissionAirbaseRoads.AfterLink(__instance, __0));
+            Try(() => MissionServicePoints.AfterLink(__instance, __0));
         }
 
         [HarmonyPostfix]
@@ -47,6 +48,7 @@ namespace CustomMaps.Patches
             if (!Ours(__instance)) return;
             Try(() => MissionAirbases.AfterUnlink(__instance));
             TryRoads(() => MissionAirbaseRoads.AfterUnlink(__instance));
+            Try(() => MissionServicePoints.AfterUnlink(__instance));
         }
 
         static bool Ours(Airbase airbase)
@@ -202,7 +204,9 @@ namespace CustomMaps.Patches
         {
             MissionAirbaseLinkPatch.Try(() =>
             {
-                if (MissionAirbases.IsOurs(__0)) MissionAirbases.SetUpPanel(__instance, __0);
+                if (!MissionAirbases.IsOurs(__0)) return;
+                MissionAirbases.SetUpPanel(__instance, __0);
+                MissionServicePoints.SetUpPanel(__instance, __0);
             });
         }
 

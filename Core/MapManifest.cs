@@ -57,6 +57,10 @@ namespace CustomMaps
         public string Version;
         public string Author;
 
+        /// <summary>The colour of the map's tag in the mission picker and on the workshop upload panel, as
+        /// "#rrggbb". Optional: without one the plugin picks a colour from the map's id.</summary>
+        public string TagColor;
+
         /// <summary>Contents of the game's <c>build-hash.txt</c> when the bundle was built.
         /// Mismatch is a warning, not an error — most updates do not move these fields.</summary>
         public string BuiltAgainstGameHash;
@@ -270,6 +274,7 @@ namespace CustomMaps
                 DisplayName = Json.GetString(root, "displayName"),
                 Version = Json.GetString(root, "version"),
                 Author = Json.GetString(root, "author"),
+                TagColor = Json.GetString(root, "tagColor"),
                 BuiltAgainstGameHash = Json.GetString(root, "builtAgainstGameHash"),
                 Credits = Json.GetString(root, "credits"),
                 Notice = Json.GetString(root, "notice"),
@@ -316,6 +321,21 @@ namespace CustomMaps
         /// <summary>The PrefabName this map will register under, given its bundle's content hash.</summary>
         public string PrefabNameFor(string contentHash) => MapIdentity.MakePrefabName(MapId, contentHash);
 
+        /// <summary>Reads a colour written as "#rrggbb", in either case.</summary>
+        public static bool TryParseColor(string hex, out byte red, out byte green, out byte blue)
+        {
+            red = green = blue = 0;
+            if (hex == null || hex.Length != 7 || hex[0] != '#') return false;
+
+            for (int i = 1; i < 7; i++)
+                if (!Uri.IsHexDigit(hex[i])) return false;
+
+            red = Convert.ToByte(hex.Substring(1, 2), 16);
+            green = Convert.ToByte(hex.Substring(3, 2), 16);
+            blue = Convert.ToByte(hex.Substring(5, 2), 16);
+            return true;
+        }
+
         /// <summary>
         /// Checks everything that can be checked without the game loaded.
         ///
@@ -333,6 +353,9 @@ namespace CustomMaps
 
             if (!MapIdentity.IsValidMapName(DisplayName, out string nameReason))
                 problems.Add(Error(nameof(DisplayName), $"'{DisplayName}' is unusable as a lobby map name: {nameReason}"));
+
+            if (!string.IsNullOrEmpty(TagColor) && !TryParseColor(TagColor, out _, out _, out _))
+                problems.Add(Warn(nameof(TagColor), $"'{TagColor}' is not a colour as #rrggbb; the map's tag gets one from its id"));
 
             ValidateAxis(problems, "X", MapSizeX, GridSizeX, OffsetX);
             ValidateAxis(problems, "Y", MapSizeY, GridSizeY, OffsetY);

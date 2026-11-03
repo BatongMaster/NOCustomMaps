@@ -26,7 +26,7 @@ namespace CustomMaps
     public sealed class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.javoski.custommaps";
-        public const string Version = "1.4.1";
+        public const string Version = "1.4.2";
 
         internal static Plugin Instance { get; private set; }
         static ManualLogSource _log;
@@ -437,6 +437,13 @@ namespace CustomMaps
             // enabled.
             Patch(harmony, typeof(Patches.MapWarmUpPatch), critical: false);
             Patch(harmony, typeof(Patches.MissionPickWarmUpPatch), critical: false);
+            Patch(harmony, typeof(Patches.MissionMapTagPatch), critical: false);
+            Patch(harmony, typeof(Patches.MissionItemTagsPatch), critical: false);
+            Patch(harmony, typeof(Patches.UploadItemModRequiredPatch), critical: false);
+            Patch(harmony, typeof(Patches.ModRequiredTogglePatch), critical: false);
+            Patch(harmony, typeof(Patches.MissionPickerTagsPatch), critical: false);
+            Patch(harmony, typeof(Patches.MissionTagBarPatch), critical: false);
+            Patch(harmony, typeof(Patches.TaxiReportPatches), critical: false);
             Patch(harmony, typeof(Patches.EditorMissionPickWarmUpPatch), critical: false);
             Patch(harmony, typeof(Patches.EditorLoadWaitPatch), critical: false);
             Patch(harmony, typeof(Patches.LobbyJoinWarmUpPatch), critical: false);

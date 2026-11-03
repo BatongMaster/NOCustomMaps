@@ -10,7 +10,7 @@ missions and multiplayer like the built-in maps.
 ### NOMM
 
 1. Search on NOMM for "Swiss Alps" and download it (it will take a while don't worry, it's a 730 MB download)
-2. Start the game. 'BepInEx/LogOutput.log' should show 'v1.4.1 ready.' and a line like
+2. Start the game. 'BepInEx/LogOutput.log' should show 'v1.4.2 ready.' and a line like
 'swissalps-<version>.nomapz -> cm.swissalps.<hash8> ("Swiss Alps", 199680x199680 m)'.
 
 ###  How to install manually (if you don't use NOMM)
@@ -50,6 +50,10 @@ one, then **Create New** or **Create Default**: the mission is made on that map,
 `cm.<mapId>.<hash8>`. Two maps with the same name show their version (or map id) on the tile. A map that
 failed to load this session is greyed out and marked "(failed to load)".
 
+An airbase's panel has a **Service Points** list, where AI aircraft taxi to after landing. It starts with
+the map's, shown on the map. Move, add or remove one and the mission uses its own list instead; remove them
+all to go back to the map's. In a mission file they are the airbase's `ServicePoints`, and none means the map's.
+
 ## Multiplayer
 
 The server and every player need the same build of the map, as its `.nomap` or its `.nomapz`, and
@@ -57,6 +61,12 @@ should run the same release of this plugin. A map registers as `cm.<mapId>.<hash
 from the `.nomap` (a `.nomapz` carries the hash of the `.nomap` it was made from), so a player with a
 different build is turned away when joining. Rebuilding a map changes that name, and missions that use
 it must be pointed at the new one (`MapKey.Path` in the mission file).
+
+**Workshop:** a mission on a custom map always goes up with the map's name as its map tag ("Swiss Alps"),
+plus "Mod Required" and "NOCustomMaps", and these can't be removed in the upload panel. The tag names the
+map, not the build: the build the mission needs is the `cm.<mapId>.<hash8>` in its file. That build doesn't
+have to be installed on your machine, but some build of the map does, for its name; if yours differs, the
+plugin says so in the log, in case the hash was mistyped. An update replaces a published mission's old tags.
 
 ## The map screen
 

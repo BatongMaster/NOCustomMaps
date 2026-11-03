@@ -5,6 +5,44 @@ namespace CustomMaps.Tests
 {
     public class MapManifestTests
     {
+        [Theory]
+        [InlineData("#d52b1e", 0xd5, 0x2b, 0x1e)]
+        [InlineData("#D52B1E", 0xd5, 0x2b, 0x1e)]
+        [InlineData("#000000", 0, 0, 0)]
+        public void TagColorParses(string hex, int r, int g, int b)
+        {
+            Assert.True(MapManifest.TryParseColor(hex, out byte red, out byte green, out byte blue));
+            Assert.Equal((r, g, b), ((int)red, (int)green, (int)blue));
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("d52b1e")]
+        [InlineData("#d52b1")]
+        [InlineData("#d52b1e00")]
+        [InlineData("#g52b1e")]
+        [InlineData("red")]
+        public void TagColorRejects(string hex)
+        {
+            Assert.False(MapManifest.TryParseColor(hex, out _, out _, out _));
+        }
+
+        [Fact]
+        public void TagColorIsOptionalAndABadOneOnlyWarns()
+        {
+            MapManifest plain = MapManifest.FromJson(Kastellan);
+            Assert.Null(plain.TagColor);
+            Assert.DoesNotContain(plain.Validate(), p => p.Field == nameof(MapManifest.TagColor));
+
+            MapManifest set = MapManifest.FromJson(Kastellan.Replace("\"mapId\": \"kastellan\",", "\"mapId\": \"kastellan\", \"tagColor\": \"#d52b1e\","));
+            Assert.Equal("#d52b1e", set.TagColor);
+            Assert.DoesNotContain(set.Validate(), p => p.Field == nameof(MapManifest.TagColor));
+
+            set.TagColor = "red";
+            Assert.Contains(set.Validate(), p => p.Field == nameof(MapManifest.TagColor));
+        }
+
         // The reference manifest for the map this repository exists to build.
         // 143360 = 28 tiles x 5120 m = 20,552 km2.
         const string Kastellan = @"{

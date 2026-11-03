@@ -20,6 +20,10 @@ namespace CustomMaps
         /// <summary>The airbase panel last set up for this airbase, whose override a move makes
         /// while it is open.</summary>
         internal AirbasePanel Panel;
+
+        /// <summary>The service points the map gave this airbase, and those the mission's replaced them
+        /// with (<see cref="MissionServicePoints"/>).</summary>
+        internal Transform[] MapServicePoints, MissionServicePoints;
     }
 
     /// <summary>
