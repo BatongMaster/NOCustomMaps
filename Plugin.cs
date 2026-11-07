@@ -38,6 +38,7 @@ namespace CustomMaps
 
         internal static ConfigEntry<string> MapDirectories;
         internal static ConfigEntry<bool> DebugLogging;
+        internal static ConfigEntry<bool> ScanWorkshop;
         internal static ConfigEntry<bool> ValidateOnLoad;
         internal static ConfigEntry<string> DonorMap;
         internal static ConfigEntry<bool> BorrowDetailRenderer;
@@ -148,6 +149,12 @@ namespace CustomMaps
                 "before the defaults. Leave empty to use only BepInEx/plugins/NOCustomMaps/maps and " +
                 "the CustomMaps folder under the game's persistent data path.");
 
+            ScanWorkshop = Config.Bind(
+                "General", "ScanWorkshop", true,
+                "Also load maps from subscribed Steam Workshop items: every item folder under " +
+                "steamapps/workshop/content/2168680 that holds a .nomap or .nomapz. Searched after every other " +
+                "folder, so a map installed by hand or by NOMM wins over the same map from the Workshop.");
+
             DebugLogging = Config.Bind(
                 "General", "DebugLogging", false,
                 "Verbose logging, prefixed [CM-DBG]. Includes the full map catalogue after every " +
@@ -230,7 +237,63 @@ namespace CustomMaps
             if (!string.IsNullOrEmpty(persistent))
                 dirs.Add(Path.Combine(persistent, "CustomMaps"));
 
+            if (ScanWorkshop == null || ScanWorkshop.Value)
+                AddWorkshopFolders(dirs);
+
             return dirs;
+        }
+
+        const string WorkshopAppId = "2168680";
+
+        /// <summary>
+        /// Maps posted to the Steam Workshop. The game has no map item type, but Steam downloads any item a
+        /// player subscribes to into <c>steamapps/workshop/content/2168680/&lt;item id&gt;/</c> all the same;
+        /// nothing looked there for bundles. This runs at plugin start, before the game has initialised
+        /// Steam, so the folders are found by path rather than through ISteamUGC: the Steam library that
+        /// holds the game (<c>steamapps/common/Nuclear Option</c> → <c>steamapps/workshop</c>), and the
+        /// game folder's own <c>steamapps</c>, which is where a dedicated server installed with SteamCMD
+        /// keeps its downloads. Only item folders that hold a bundle are added, so the ~100 mission and
+        /// livery items a player typically has cost one directory listing each. An item that finishes
+        /// downloading after the game has started is picked up at the next start.
+        /// </summary>
+        static void AddWorkshopFolders(List<string> dirs)
+        {
+            var roots = new List<string>();
+            try
+            {
+                string game = Paths.GameRootPath;
+                DirectoryInfo steamapps = Directory.GetParent(game)?.Parent;
+                if (steamapps != null)
+                    roots.Add(Path.Combine(steamapps.FullName, "workshop", "content", WorkshopAppId));
+                roots.Add(Path.Combine(game, "steamapps", "workshop", "content", WorkshopAppId));
+            }
+            catch (Exception e)
+            {
+                LogWarning("could not work out the Workshop folder: " + e.Message);
+                return;
+            }
+
+            int added = 0;
+            foreach (string root in roots)
+            {
+                try
+                {
+                    if (!Directory.Exists(root)) continue;
+                    foreach (string item in Directory.GetDirectories(root))
+                    {
+                        if (Directory.GetFiles(item, "*.nomap").Length == 0 &&
+                            Directory.GetFiles(item, "*.nomapz").Length == 0) continue;
+                        dirs.Add(item);
+                        added++;
+                    }
+                }
+                catch (Exception e)
+                {
+                    LogWarning("could not list Workshop items in " + root + ": " + e.Message);
+                }
+            }
+            if (added > 0)
+                LogInfo($"{added} Workshop item(s) hold a map bundle");
         }
 
         /// <summary>Every folder under <paramref name="addons"/>, at any depth, if it exists. A
