@@ -323,6 +323,8 @@ namespace CustomMaps
             Field(typeof(NuclearOption.Effects.TerrainHeightMap), "terrainPhysicMaterials", critical: false);
             Field(typeof(NuclearOption.Effects.TerrainHeightMap), "terrainMaterials", critical: false);
             Field(typeof(Airbase), AirbaseBuilder.TaxiNetworkField, critical: false);
+            Field(typeof(BuildingLights), AirbaseBuilder.BuildingLightsRenderersField, critical: false);
+            Field(typeof(BuildingLights), AirbaseBuilder.BuildingLightsLightsField, critical: false);
             Field(typeof(Airbase), AirbaseBuilder.ServicePointsField, critical: false);
             Method(typeof(DynamicMap), "MapControls", critical: false);
             Method(typeof(MathExtensions), nameof(MathExtensions.ClampPos), critical: false);

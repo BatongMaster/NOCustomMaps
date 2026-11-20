@@ -285,6 +285,7 @@ namespace CustomMaps
                                 "paving, floor and roads to stand on");
 
             ForgetRunwayLights(clone);
+            ForgetBuildingLights(clone);
             LayOutRunway(clone, placement);
             PlaceFlag(clone, placement);
             int[] runwayOf = LayOutExtraRunways(clone, placement);
@@ -750,6 +751,47 @@ namespace CustomMaps
         const string RunwayLightsField = "runwayLights";
 
         /// <summary>
+        /// Lets go of the lights the donor's <c>BuildingLights</c> components switch by daylight.
+        ///
+        /// <c>BuildingLights</c> keeps its own private serialised arrays of renderers and lights,
+        /// copied with the clone and pointing into its subtree. In <c>Start</c>, and on every
+        /// <c>LevelInfo.onDaylightChange</c> after that, it sets each of them to
+        /// <c>!isDayLight</c>: so whenever it is not daylight (at night, or at dawn under heavy
+        /// weather) it switches back on the light renderers <see cref="Hide"/> has just switched
+        /// off, and the donor's rows of runway edge lights appear beside every custom airbase,
+        /// on grass where the field has no runway of its own (issue #2). Its subscription is made
+        /// in <c>Start</c>, possibly before or after this runs, so the component is left in
+        /// place and its arrays are emptied instead: the handler then has nothing to switch.
+        ///
+        /// Emptied rather than left null, as <see cref="ForgetRunwayLights"/> does: the game
+        /// loops over them when the daylight changes and when a dependent part is damaged.
+        /// </summary>
+        static void ForgetBuildingLights(Airbase clone)
+        {
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            FieldInfo renderers = typeof(BuildingLights).GetField(BuildingLightsRenderersField, flags);
+            FieldInfo lights = typeof(BuildingLights).GetField(BuildingLightsLightsField, flags);
+            if (renderers == null || lights == null)
+            {
+                Plugin.LogWarning($"BuildingLights has no '{BuildingLightsRenderersField}' or '{BuildingLightsLightsField}' " +
+                                  "field; the donor map's runway lights may show beside custom airbases at night");
+                return;
+            }
+
+            foreach (BuildingLights buildingLights in clone.GetComponentsInChildren<BuildingLights>(true))
+            {
+                renderers.SetValue(buildingLights, new Renderer[0]);
+                lights.SetValue(buildingLights, new Light[0]);
+            }
+        }
+
+        /// <summary>The private renderer array <see cref="ForgetBuildingLights"/> empties; checked at startup.</summary>
+        public const string BuildingLightsRenderersField = "renderers";
+
+        /// <summary>The private light array <see cref="ForgetBuildingLights"/> empties; checked at startup.</summary>
+        public const string BuildingLightsLightsField = "lights";
+
+        /// <summary>
         /// Takes away the donor's taxi network, for a field that cannot be given its own
         /// (<see cref="LayOutTaxiNetwork"/>): the game has no field to set, or the runway is too short
         /// for even the default network.
@@ -813,6 +855,10 @@ namespace CustomMaps
         {
             foreach (Renderer renderer in clone.GetComponentsInChildren<Renderer>(true))
                 renderer.enabled = false;
+
+            // Lights are not renderers: a donor's runway and building lights cast light of their own.
+            foreach (Light light in clone.GetComponentsInChildren<Light>(true))
+                light.enabled = false;
 
             int solid = 0;
             foreach (Collider collider in clone.GetComponentsInChildren<Collider>(true))
